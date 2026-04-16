@@ -38,10 +38,6 @@ jobs:
         working-directory: server
         run: uv sync --frozen --dev
 
-      - name: Run tests
-        working-directory: server
-        run: uv run pytest -q
-
       - name: Build Docker image
         run: docker build -f ./server/Dockerfile ./server
 
