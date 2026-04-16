@@ -14,43 +14,42 @@ async def handle_text_message(
 ) -> None:
     if isinstance(message, ClientEventMessage):
         logger.info(
-            "received client event",
+            "Received client event",
             extra={
-                "connection_id": connection_id,
+                "connectionId": connection_id,
                 "event": message.event,
-                "message_id": message.id,
+                "messageId": message.id,
             },
         )
         return
 
     if isinstance(message, RequestMessage):
         logger.info(
-            "received request",
+            "Received request",
             extra={
-                "connection_id": connection_id,
+                "connectionId": connection_id,
+                "messageId": message.Request.id,
                 "command": message.Request.command,
-                "message_id": message.Request.id,
             },
         )
         return
 
     logger.info(
-        "received response",
+        "Received response",
         extra={
-            "connection_id": connection_id,
-            "message_id": message.Response.id,
-            "code": message.Response.code,
+            "connectionId": connection_id,
+            "messageId": message.Response.id,
         },
     )
 
 
 async def handle_stream_frame(frame: StreamFrame, connection_id: str) -> None:
     logger.info(
-        "received stream frame",
+        "Received stream frame",
         extra={
-            "connection_id": connection_id,
+            "connectionId": connection_id,
             "tag": frame.tag,
-            "message_id": frame.id,
-            "byte_length": len(frame.bytes),
+            "messageId": frame.id,
+            "byteLength": len(frame.bytes),
         },
     )

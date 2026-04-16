@@ -222,10 +222,13 @@ class InstructionEventData(BaseModel):
     def from_raw(cls, value: Any) -> dict[str, Any]:
         if value == "NewFile":
             return {"kind": "NewFile", "line": None}
-        if isinstance(value, dict) and "NewLine" in value:
-            return {"kind": "NewLine", "line": value["NewLine"]}
-        if isinstance(value, dict) and "kind" in value:
-            return value
+        if isinstance(value, dict):
+            if "NewLine" in value:
+                return {"kind": "NewLine", "line": value["NewLine"]}
+            if "kind" in value:
+                return value
+            # 空字典或未识别格式，按 NewFile 兜底
+            return {"kind": "NewFile", "line": None}
         raise TypeError("invalid instruction event payload")
 
     @model_validator(mode="after")

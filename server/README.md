@@ -10,7 +10,7 @@ uv sync
 uv run txuw-xiaoai-server
 ```
 
-默认监听 `0.0.0.0:8000`，WebSocket 入口为 `/ws`，健康检查为 `/healthz`。
+默认监听 `0.0.0.0:8000`，WebSocket 入口为 `/ws`，健康检查为 `/health`。
 
 ## 开发命令
 
