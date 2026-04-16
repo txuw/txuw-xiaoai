@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "txuw-xiaoai-server"
+version = "0.1.0"
+description = "Python WebSocket server for Open-XiaoAI client events"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.10.0",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.scripts]
+txuw-xiaoai-server = "txuw_xiaoai_server.__main__:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.3.0",
+    "websockets>=15.0.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/txuw_xiaoai_server"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
