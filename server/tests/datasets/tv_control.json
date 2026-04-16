@@ -1,0 +1,61 @@
+{
+  "name": "tv_control",
+  "description": "正常对话：开关电视",
+  "frames": [
+    "{\"Event\":{\"id\":\"49199811-f382-43b2-adfe-eefad505f411\",\"event\":\"instruction\",\"data\":\"NewFile\"}}",
+    "{\"Event\":{\"id\":\"af81ce9b-f4c4-4a1e-8733-83884503889e\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"fefeeedf876a454294cc87c5783eb006\\\",\\\"name\\\":\\\"RecognizeResult\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"is_final\\\":false,\\\"is_vad_begin\\\":true,\\\"results\\\":[{\\\"asr_binary_offset\\\":1360,\\\"begin_offset\\\":1260,\\\"confidence\\\":0.0,\\\"end_offset\\\":1360,\\\"text\\\":\\\"关\\\"}]}}\"}}}",
+    "{\"Event\":{\"id\":\"86f851ae-b591-4058-b843-84733cfc7008\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"b57a227bf4d44d2e9c37a263980f9318\\\",\\\"name\\\":\\\"RecognizeResult\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"is_final\\\":false,\\\"is_vad_begin\\\":true,\\\"results\\\":[{\\\"asr_binary_offset\\\":2040,\\\"begin_offset\\\":1260,\\\"confidence\\\":0.0,\\\"end_offset\\\":2040,\\\"is_nlp_request\\\":true,\\\"is_stop\\\":true,\\\"text\\\":\\\"关闭电视\\\"}]}}\"}}}",
+    "{\"Event\":{\"id\":\"cef32f10-991b-49f9-801e-c8f5bebb7ddc\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"10abf547e2204646866c114767ceee5e\\\",\\\"name\\\":\\\"StopCapture\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"stop_time\\\":2528}}\"}}}",
+    "{\"Event\":{\"id\":\"7b829b15-152f-4797-a248-e2ccd12bffca\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"313053ba3f284ffcb02c004ea0b931c7\\\",\\\"name\\\":\\\"StartAnswer\\\",\\\"namespace\\\":\\\"Nlp\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"b33e0b3a-e371-4fbb-8633-77c00ea57ea2\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"b5f0db6f20e64f7d9c3611acdae91bda\\\",\\\"name\\\":\\\"InstructionControl\\\",\\\"namespace\\\":\\\"Execution\\\"},\\\"payload\\\":{\\\"behavior\\\":\\\"INSERT_FRONT\\\"}}\"}}}",
+    "{\"Event\":{\"id\":\"67b5107b-38e6-4e55-84c3-ecec5db2f093\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"344fe05b02af43db8e75556c68f6ae2b\\\",\\\"name\\\":\\\"Speak\\\",\\\"namespace\\\":\\\"SpeechSynthesizer\\\"},\\\"payload\\\":{\\\"text\\\":\\\"正在为你关闭电视。\\\"}}\"}}}",
+    "{\"Event\":{\"id\":\"fb06008e-d930-4a34-b768-ea0ef38d66ab\",\"event\":\"playing\",\"data\":\"Playing\"}}",
+    "{\"Event\":{\"id\":\"19c1d22a-9dcd-41c7-bd70-f33e827b354f\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"1408c325701c465ab728b3a58c8310b9\\\",\\\"name\\\":\\\"FinishAnswer\\\",\\\"namespace\\\":\\\"Nlp\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"f128e07d-58f9-4f35-9300-b960f062856c\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"3b0fb3349c514751a67fd1d86c4de31e\\\",\\\"name\\\":\\\"FinishSpeakStream\\\",\\\"namespace\\\":\\\"SpeechSynthesizer\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"5fcf3960-da14-48f4-98c7-6f23cdde3791\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"a77c178e8b88534bb0b9df75d56123bb\\\",\\\"id\\\":\\\"937b22be9cfd4a5b93391a5fe380bab0140601940981504\\\",\\\"name\\\":\\\"Finish\\\",\\\"namespace\\\":\\\"Dialog\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"41ee49a2-5dd5-4b78-b510-66f35e30ec87\",\"event\":\"playing\",\"data\":\"Idle\"}}"
+  ],
+  "expected": {
+    "event_sequence": [
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "playing",
+      "instruction",
+      "instruction",
+      "instruction",
+      "playing"
+    ],
+    "instruction_names": [
+      "RecognizeResult",
+      "RecognizeResult",
+      "StopCapture",
+      "StartAnswer",
+      "InstructionControl",
+      "Speak",
+      "FinishAnswer",
+      "FinishSpeakStream",
+      "Finish"
+    ],
+    "summaries": [
+      "instruction new file",
+      "text=关 is_final=False results=1",
+      "text=关闭电视 is_final=False results=1",
+      "stop_time=2528",
+      "StartAnswer",
+      "behavior=INSERT_FRONT",
+      "text=正在为你关闭电视。",
+      "state=Playing",
+      "FinishAnswer",
+      "FinishSpeakStream",
+      "Finish",
+      "state=Idle"
+    ],
+    "degraded_count": 0,
+    "terminal_playing_state": "Idle"
+  }
+}

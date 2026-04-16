@@ -21,6 +21,6 @@ uv run uvicorn txuw_xiaoai_server.app:create_app --factory --host 0.0.0.0 --port
 
 ## 环境变量
 
-- `TXUW_XIAOAI_HOST`：默认 `0.0.0.0`
-- `TXUW_XIAOAI_PORT`：默认 `8000`
-- `TXUW_XIAOAI_LOG_LEVEL`：默认 `INFO`
+- `HOST`：默认 `0.0.0.0`
+- `PORT`：默认 `8000`
+- `LOG_LEVEL`：默认 `INFO`

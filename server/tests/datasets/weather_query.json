@@ -1,0 +1,54 @@
+{
+  "name": "weather_query",
+  "description": "正常对话：询问天气",
+  "frames": [
+    "{\"Event\":{\"id\":\"e04f9449-fd21-412b-9cc9-ef2f20cb87ef\",\"event\":\"instruction\",\"data\":\"NewFile\"}}",
+    "{\"Event\":{\"id\":\"7ed67967-4907-4363-b975-213d5b305a11\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"5263f41f3e174747a0fca7723d93f2d6\\\",\\\"name\\\":\\\"RecognizeResult\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"is_final\\\":false,\\\"is_vad_begin\\\":false,\\\"results\\\":[{\\\"confidence\\\":0.0,\\\"text\\\":\\\"\\\"}]}}\"}}}",
+    "{\"Event\":{\"id\":\"b1be299d-a244-4807-a444-67cc867e0a7c\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"14e47b559bfd4f87ada9f834b6c94150\\\",\\\"name\\\":\\\"RecognizeResult\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"is_final\\\":false,\\\"is_vad_begin\\\":true,\\\"results\\\":[{\\\"asr_binary_offset\\\":4480,\\\"begin_offset\\\":2500,\\\"confidence\\\":0.0,\\\"end_offset\\\":4480,\\\"is_nlp_request\\\":true,\\\"is_stop\\\":true,\\\"text\\\":\\\"今天的天气温度\\\"}]}}\"}}}",
+    "{\"Event\":{\"id\":\"17f28667-16e7-4d48-8757-706533fa0a37\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"be4422f45ab047ba9cdf0b07085368ed\\\",\\\"name\\\":\\\"StopCapture\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"stop_time\\\":5024}}\"}}}",
+    "{\"Event\":{\"id\":\"6930b879-f6f1-401f-bd2e-8abe71f8a444\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"f374c0320d8e4be9a99a621433099b1e\\\",\\\"name\\\":\\\"Query\\\",\\\"namespace\\\":\\\"Template\\\"},\\\"payload\\\":{\\\"text\\\":\\\"今天的天气温度\\\"}}\"}}}",
+    "{\"Event\":{\"id\":\"13d0ac4b-ddda-428e-94fa-c775640ab37b\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"c198430998264b29af6a32602fdd9aad\\\",\\\"name\\\":\\\"SpeakStream\\\",\\\"namespace\\\":\\\"SpeechSynthesizer\\\"},\\\"payload\\\":{\\\"text\\\":\\\"重庆渝北今天18℃到28℃，\\\"}}\"}}}",
+    "{\"Event\":{\"id\":\"a9d465ca-570b-4fef-97f8-c55fe15ea3ca\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"331ca8532ae54810a0f831676d2b3c16\\\",\\\"name\\\":\\\"FinishStream\\\",\\\"namespace\\\":\\\"Nlp\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"2aa94e41-d6dd-481e-84f5-6ce14b3ff596\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"facb92e19f147e19a1af5ed415d893d\\\",\\\"name\\\":\\\"FinishSpeakStream\\\",\\\"namespace\\\":\\\"SpeechSynthesizer\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"19530107-8539-4481-b8b5-32891c8f5782\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"362d013bb1619f5d131196647e2d75ad\\\",\\\"id\\\":\\\"ad67ef7741274eed8fad4144ebc5ffbc\\\",\\\"name\\\":\\\"Finish\\\",\\\"namespace\\\":\\\"Dialog\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"23fdca5a-be45-4078-ac90-6498988a37bc\",\"event\":\"playing\",\"data\":\"Idle\"}}"
+  ],
+  "expected": {
+    "event_sequence": [
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "playing"
+    ],
+    "instruction_names": [
+      "RecognizeResult",
+      "RecognizeResult",
+      "StopCapture",
+      "Query",
+      "SpeakStream",
+      "FinishStream",
+      "FinishSpeakStream",
+      "Finish"
+    ],
+    "summaries": [
+      "instruction new file",
+      "text=- is_final=False results=1",
+      "text=今天的天气温度 is_final=False results=1",
+      "stop_time=5024",
+      "Query",
+      "text=重庆渝北今天18℃到28℃，",
+      "FinishStream",
+      "FinishSpeakStream",
+      "Finish",
+      "state=Idle"
+    ],
+    "degraded_count": 0,
+    "terminal_playing_state": "Idle"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "wake_only",
+  "description": "启动唤醒，无后续语音输入",
+  "frames": [
+    "{\"Event\":{\"id\":\"4764f9e0-7220-4cd5-85cf-6500f3dea0be\",\"event\":\"instruction\",\"data\":\"NewFile\"}}",
+    "{\"Event\":{\"id\":\"519f8a48-3f9d-451a-92f7-ce3a7b354de3\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"6dd2ce9d3947b8fac7d5a8e596823b6b\\\",\\\"id\\\":\\\"d504135555ea4b1282e738266530e91d\\\",\\\"name\\\":\\\"RecognizeResult\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"is_final\\\":false,\\\"is_vad_begin\\\":false,\\\"results\\\":[{\\\"confidence\\\":0.0,\\\"text\\\":\\\"\\\"}]}}\"}}}",
+    "{\"Event\":{\"id\":\"ffbb5323-f602-4abc-a3e4-353cd195ddc4\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"6dd2ce9d3947b8fac7d5a8e596823b6b\\\",\\\"id\\\":\\\"cba795b0ec7f4e338a6c63b9519730f6\\\",\\\"name\\\":\\\"StopCapture\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{}}\"}}}",
+    "{\"Event\":{\"id\":\"e3b91ead-cf41-4f33-8194-be5da0d2222a\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"6dd2ce9d3947b8fac7d5a8e596823b6b\\\",\\\"id\\\":\\\"2d3c68fa0fd745ada0f9b770f6f31d34\\\",\\\"name\\\":\\\"RecognizeResult\\\",\\\"namespace\\\":\\\"SpeechRecognizer\\\"},\\\"payload\\\":{\\\"is_final\\\":true,\\\"results\\\":[{\\\"confidence\\\":0.0,\\\"origin_text\\\":\\\"\\\",\\\"text\\\":\\\"\\\"}]}}\"}}}",
+    "{\"Event\":{\"id\":\"9ebb739d-91a7-40ff-846c-a15d395365fd\",\"event\":\"instruction\",\"data\":{\"NewLine\":\"{\\\"header\\\":{\\\"dialog_id\\\":\\\"6dd2ce9d3947b8fac7d5a8e596823b6b\\\",\\\"id\\\":\\\"dfaafb8a20334e109161ece3a5d292f4140092580513536\\\",\\\"name\\\":\\\"Finish\\\",\\\"namespace\\\":\\\"Dialog\\\"},\\\"payload\\\":{}}\"}}}"
+  ],
+  "expected": {
+    "event_sequence": [
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction",
+      "instruction"
+    ],
+    "instruction_names": [
+      "RecognizeResult",
+      "StopCapture",
+      "RecognizeResult",
+      "Finish"
+    ],
+    "summaries": [
+      "instruction new file",
+      "text=- is_final=False results=1",
+      "StopCapture degraded",
+      "RecognizeResult degraded",
+      "Finish"
+    ],
+    "degraded_count": 2,
+    "terminal_playing_state": null
+  }
+}

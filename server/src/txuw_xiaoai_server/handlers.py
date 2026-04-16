@@ -2,54 +2,32 @@ from __future__ import annotations
 
 import logging
 
-from .protocol import ClientEventMessage, RequestMessage, ResponseMessage, StreamFrame
+from .protocol import InboundMessage, InboundStream
+from .socket_logging import build_socket_log_entry
 
 
 logger = logging.getLogger(__name__)
 
 
 async def handle_text_message(
-    message: RequestMessage | ResponseMessage | ClientEventMessage,
+    message: InboundMessage,
     connection_id: str,
 ) -> None:
-    if isinstance(message, ClientEventMessage):
-        logger.info(
-            "Received client event",
-            extra={
-                "connectionId": connection_id,
-                "event": message.event,
-                "messageId": message.id,
-            },
-        )
-        return
-
-    if isinstance(message, RequestMessage):
-        logger.info(
-            "Received request",
-            extra={
-                "connectionId": connection_id,
-                "messageId": message.Request.id,
-                "command": message.Request.command,
-            },
-        )
-        return
-
-    logger.info(
-        "Received response",
-        extra={
-            "connectionId": connection_id,
-            "messageId": message.Response.id,
-        },
+    entry = build_socket_log_entry(
+        message,
+        connection_id,
+        frame_type="text",
     )
+    logger.info(entry.event_name, extra=entry.to_logger_extra())
 
 
-async def handle_stream_frame(frame: StreamFrame, connection_id: str) -> None:
-    logger.info(
-        "Received stream frame",
-        extra={
-            "connectionId": connection_id,
-            "tag": frame.tag,
-            "messageId": frame.id,
-            "byteLength": len(frame.bytes),
-        },
+async def handle_stream_frame(
+    frame: InboundStream,
+    connection_id: str,
+) -> None:
+    entry = build_socket_log_entry(
+        frame,
+        connection_id,
+        frame_type="binary",
     )
+    logger.info(entry.event_name, extra=entry.to_logger_extra())

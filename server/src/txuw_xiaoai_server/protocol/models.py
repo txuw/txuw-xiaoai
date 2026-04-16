@@ -4,7 +4,7 @@ import json
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 class RequestBody(BaseModel):
@@ -13,8 +13,9 @@ class RequestBody(BaseModel):
     payload: Any | None = None
 
 
-class RequestMessage(BaseModel):
-    Request: RequestBody
+class InboundRequest(BaseModel):
+    message_type: Literal["request"] = "request"
+    body: RequestBody
 
 
 class ResponseBody(BaseModel):
@@ -24,47 +25,19 @@ class ResponseBody(BaseModel):
     data: Any | None = None
 
 
-class ResponseMessage(BaseModel):
-    Response: ResponseBody
+class InboundResponse(BaseModel):
+    message_type: Literal["response"] = "response"
+    body: ResponseBody
 
 
-class GenericEventData(BaseModel):
+class GenericPayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class PlayingState(str, Enum):
-    PLAYING = "Playing"
-    PAUSED = "Paused"
-    IDLE = "Idle"
-
-
-class PlayingEventData(BaseModel):
-    state: PlayingState
-
-    @model_validator(mode="before")
-    @classmethod
-    def from_raw(cls, value: Any) -> dict[str, Any]:
-        if isinstance(value, str):
-            return {"state": value}
-        if isinstance(value, dict) and "state" in value:
-            return value
-        raise TypeError("invalid playing event payload")
-
-
-class KwsEventData(BaseModel):
-    kind: Literal["Started", "Keyword"]
-    keyword: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def from_raw(cls, value: Any) -> dict[str, Any]:
-        if value == "Started":
-            return {"kind": "Started", "keyword": None}
-        if isinstance(value, dict) and "Keyword" in value:
-            return {"kind": "Keyword", "keyword": value["Keyword"]}
-        if isinstance(value, dict) and "kind" in value:
-            return value
-        raise TypeError("invalid kws event payload")
+class InstructionPayloadError(BaseModel):
+    model_name: str
+    error_type: str
+    message: str
 
 
 class InstructionHeader(BaseModel):
@@ -157,10 +130,6 @@ class InstructionControlPayload(BaseModel):
     behavior: str
 
 
-class GenericPayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-
 InstructionPayload = (
     EmptyPayload
     | RecognizeResultPayload
@@ -173,69 +142,96 @@ InstructionPayload = (
 )
 
 
-class InstructionEnvelope(BaseModel):
-    header: InstructionHeader
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-
-class DecodedInstruction(BaseModel):
+class InstructionEnvelopeDecoded(BaseModel):
     raw: str
-    envelope: InstructionEnvelope
+    header: InstructionHeader
+    payload_kind: str
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
     payload_model: InstructionPayload
-
-    @property
-    def name(self) -> str:
-        return self.envelope.header.name
-
-    @classmethod
-    def from_raw(cls, raw: str) -> "DecodedInstruction":
-        envelope = InstructionEnvelope.model_validate_json(raw)
-        payload_model = _decode_instruction_payload(envelope.header.name, envelope.payload)
-        return cls(raw=raw, envelope=envelope, payload_model=payload_model)
+    payload_error: InstructionPayloadError | None = None
 
 
-def _decode_instruction_payload(name: str, payload: dict[str, Any]) -> InstructionPayload:
-    if name in {"StartStream", "FinishStream", "FinishSpeakStream", "Finish"}:
-        return EmptyPayload.model_validate(payload)
-    if name == "RecognizeResult":
-        return RecognizeResultPayload.model_validate(payload)
-    if name == "StopCapture":
-        return StopCapturePayload.model_validate(payload)
-    if name in {"Speak", "SpeakStream"}:
-        return SpeakPayload.model_validate(payload)
-    if name == "Play":
-        return PlayPayload.model_validate(payload)
-    if name == "SetProperty":
-        return SetPropertyPayload.model_validate(payload)
-    if name == "InstructionControl":
-        return InstructionControlPayload.model_validate(payload)
-    return GenericPayload.model_validate(payload)
+class InstructionNewFile(BaseModel):
+    kind: Literal["NewFile"] = "NewFile"
 
 
-class InstructionEventData(BaseModel):
-    kind: Literal["NewFile", "NewLine"]
-    line: str | None = None
-    decoded_instruction: DecodedInstruction | None = None
+class InstructionNewLine(BaseModel):
+    kind: Literal["NewLine"] = "NewLine"
+    raw_line: str
+    decoded_envelope: InstructionEnvelopeDecoded | None = None
+    payload_error: InstructionPayloadError | None = None
+
+
+InstructionEventData = InstructionNewFile | InstructionNewLine
+
+
+class PlayingState(str, Enum):
+    PLAYING = "Playing"
+    PAUSED = "Paused"
+    IDLE = "Idle"
+
+
+class PlayingEventData(BaseModel):
+    state: PlayingState
 
     @model_validator(mode="before")
     @classmethod
     def from_raw(cls, value: Any) -> dict[str, Any]:
-        if value == "NewFile":
-            return {"kind": "NewFile", "line": None}
-        if isinstance(value, dict):
-            if "NewLine" in value:
-                return {"kind": "NewLine", "line": value["NewLine"]}
-            if "kind" in value:
-                return value
-            # 空字典或未识别格式，按 NewFile 兜底
-            return {"kind": "NewFile", "line": None}
-        raise TypeError("invalid instruction event payload")
+        if isinstance(value, str):
+            return {"state": value}
+        if isinstance(value, dict) and "state" in value:
+            return value
+        raise TypeError("invalid playing event payload")
 
-    @model_validator(mode="after")
-    def decode_instruction(self) -> "InstructionEventData":
-        if self.kind == "NewLine" and self.line:
-            self.decoded_instruction = DecodedInstruction.from_raw(self.line)
-        return self
+
+class KwsEventData(BaseModel):
+    kind: Literal["Started", "Keyword"]
+    keyword: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def from_raw(cls, value: Any) -> dict[str, Any]:
+        if value == "Started":
+            return {"kind": "Started", "keyword": None}
+        if isinstance(value, dict) and "Keyword" in value:
+            return {"kind": "Keyword", "keyword": value["Keyword"]}
+        if isinstance(value, dict) and "kind" in value:
+            return value
+        raise TypeError("invalid kws event payload")
+
+
+class InstructionEventMessage(BaseModel):
+    message_type: Literal["event"] = "event"
+    event: Literal["instruction"] = "instruction"
+    id: str
+    data: InstructionEventData
+    raw_data: Any | None = None
+    payload_error: InstructionPayloadError | None = None
+
+
+class PlayingEventMessage(BaseModel):
+    message_type: Literal["event"] = "event"
+    event: Literal["playing"] = "playing"
+    id: str
+    data: PlayingEventData | None = None
+    raw_data: Any | None = None
+    payload_error: InstructionPayloadError | None = None
+
+
+class KwsEventMessage(BaseModel):
+    message_type: Literal["event"] = "event"
+    event: Literal["kws"] = "kws"
+    id: str
+    data: KwsEventData | None = None
+    raw_data: Any | None = None
+    payload_error: InstructionPayloadError | None = None
+
+
+class UnknownEventMessage(BaseModel):
+    message_type: Literal["event"] = "event"
+    event: str
+    id: str
+    raw_data: Any | None = None
 
 
 class EventBody(BaseModel):
@@ -244,24 +240,9 @@ class EventBody(BaseModel):
     data: Any | None = None
 
 
-class ClientEventMessage(BaseModel):
-    id: str
-    event: str
-    data: Any | None
-
-    @classmethod
-    def from_body(cls, body: EventBody) -> "ClientEventMessage":
-        if body.event == "instruction":
-            data = InstructionEventData.model_validate(body.data)
-        elif body.event == "playing":
-            data = PlayingEventData.model_validate(body.data)
-        elif body.event == "kws":
-            data = KwsEventData.model_validate(body.data)
-        elif body.data is None:
-            data = None
-        else:
-            data = GenericEventData.model_validate(body.data)
-        return cls(id=body.id, event=body.event, data=data)
+InboundEvent = (
+    InstructionEventMessage | PlayingEventMessage | KwsEventMessage | UnknownEventMessage
+)
 
 
 class StreamFrame(BaseModel):
@@ -283,3 +264,94 @@ class StreamFrame(BaseModel):
         result = self.model_dump()
         result["bytes"] = list(self.bytes)
         return json.loads(json.dumps(result))
+
+
+class RecordStreamMessage(BaseModel):
+    message_type: Literal["stream"] = "stream"
+    tag: Literal["record"] = "record"
+    frame: StreamFrame
+
+
+class UnknownStreamMessage(BaseModel):
+    message_type: Literal["stream"] = "stream"
+    tag: str
+    frame: StreamFrame
+
+
+InboundStream = RecordStreamMessage | UnknownStreamMessage
+InboundMessage = InboundRequest | InboundResponse | InboundEvent | InboundStream
+
+
+_PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
+    "RecognizeResult": RecognizeResultPayload,
+    "StopCapture": StopCapturePayload,
+    "Speak": SpeakPayload,
+    "SpeakStream": SpeakPayload,
+    "Play": PlayPayload,
+    "SetProperty": SetPropertyPayload,
+    "InstructionControl": InstructionControlPayload,
+}
+_EMPTY_PAYLOAD_NAMES = {"StartStream", "FinishStream", "FinishSpeakStream", "Finish"}
+
+
+def decode_instruction_event_data(value: Any) -> tuple[InstructionEventData, InstructionPayloadError | None]:
+    if value == "NewFile":
+        return InstructionNewFile(), None
+
+    if isinstance(value, dict) and "NewLine" in value:
+        raw_line = value["NewLine"]
+        try:
+            decoded = decode_instruction_line(raw_line)
+            return InstructionNewLine(raw_line=raw_line, decoded_envelope=decoded), decoded.payload_error
+        except (ValidationError, ValueError, TypeError) as exc:
+            payload_error = InstructionPayloadError(
+                model_name="InstructionEnvelopeDecoded",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
+            return InstructionNewLine(raw_line=raw_line, payload_error=payload_error), payload_error
+
+    raise TypeError("invalid instruction event payload")
+
+
+def decode_instruction_line(raw: str) -> InstructionEnvelopeDecoded:
+    envelope = _InstructionEnvelope.model_validate_json(raw)
+    payload_kind, payload_model, payload_error = _decode_instruction_payload(
+        envelope.header.name,
+        envelope.payload,
+    )
+    return InstructionEnvelopeDecoded(
+        raw=raw,
+        header=envelope.header,
+        payload_kind=payload_kind,
+        raw_payload=envelope.payload,
+        payload_model=payload_model,
+        payload_error=payload_error,
+    )
+
+
+class _InstructionEnvelope(BaseModel):
+    header: InstructionHeader
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+def _decode_instruction_payload(
+    name: str,
+    payload: dict[str, Any],
+) -> tuple[str, InstructionPayload, InstructionPayloadError | None]:
+    if name in _EMPTY_PAYLOAD_NAMES:
+        return "EmptyPayload", EmptyPayload.model_validate(payload), None
+
+    model = _PAYLOAD_MODELS.get(name)
+    if model is None:
+        return "GenericPayload", GenericPayload.model_validate(payload), None
+
+    try:
+        return model.__name__, model.model_validate(payload), None
+    except (ValidationError, ValueError, TypeError) as exc:
+        error = InstructionPayloadError(
+            model_name=model.__name__,
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        return model.__name__, GenericPayload.model_validate(payload), error
