@@ -11,5 +11,7 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
+    dashscope_api_key: str = ""
+
 
 settings = Settings()
