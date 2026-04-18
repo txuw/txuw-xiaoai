@@ -246,6 +246,7 @@ class TtsReplacementCoordinator:
             return
 
         session.server_owned = True
+        session.llm_full_text = ""
         logger.info(
             "dialog.server_owned",
             extra={
@@ -373,6 +374,7 @@ class TtsReplacementCoordinator:
 
         try:
             assert self._llm_client is not None
+            session = self._session_store.get(context.connection_id, dialog_id)
             async for delta in self._llm_client.stream_text(prompt):
                 if not delta or not delta.strip():
                     continue
@@ -381,6 +383,7 @@ class TtsReplacementCoordinator:
                 if session is None or session.engine is None:
                     return
 
+                session.llm_full_text += delta
                 await session.engine.push_text(delta)
                 summary = f"text={_truncate_text(delta)}"
                 logger.info(
@@ -406,11 +409,13 @@ class TtsReplacementCoordinator:
                 )
 
             await self.complete(context.connection_id, dialog_id)
+            session = self._session_store.get(context.connection_id, dialog_id)
             logger.info(
                 "llm.stream.completed",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
+                    "fullText": _truncate_text(_get_llm_full_text(session), limit=500),
                     "instructionName": instruction_name,
                     "source": source,
                     "status": "completed",
@@ -418,11 +423,13 @@ class TtsReplacementCoordinator:
                 },
             )
         except asyncio.CancelledError:
+            session = self._session_store.get(context.connection_id, dialog_id)
             logger.info(
                 "llm.stream.cancelled",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
+                    "fullText": _truncate_text(_get_llm_full_text(session), limit=500),
                     "instructionName": instruction_name,
                     "source": source,
                     "status": "cancelled",
@@ -431,11 +438,13 @@ class TtsReplacementCoordinator:
             )
             raise
         except Exception:
+            session = self._session_store.get(context.connection_id, dialog_id)
             logger.exception(
                 "llm.stream.failed",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
+                    "fullText": _truncate_text(_get_llm_full_text(session), limit=500),
                     "instructionName": instruction_name,
                     "source": source,
                     "status": "error",
@@ -456,3 +465,9 @@ class TtsReplacementCoordinator:
 
 def _truncate_text(value: str, limit: int = 160) -> str:
     return value if len(value) <= limit else f"{value[:limit]}..."
+
+
+def _get_llm_full_text(session: DialogSessionState | None) -> str:
+    if session is None:
+        return ""
+    return session.llm_full_text

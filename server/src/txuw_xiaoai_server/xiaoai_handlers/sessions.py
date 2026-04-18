@@ -21,6 +21,7 @@ class DialogSessionState:
     final_asr_text: str = ""
     server_owned: bool = False
     llm_task: asyncio.Task[None] | None = None
+    llm_full_text: str = ""
     engine: StreamingTtsEngine | None = None
 
 

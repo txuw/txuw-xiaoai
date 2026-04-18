@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -299,6 +300,36 @@ def test_query_starts_llm_stream_and_forwards_text_to_tts() -> None:
     assert engine.started is True
     assert engine.pushed_texts == ["answer ", "from llm"]
     assert engine.completed == 1
+
+
+def test_llm_completed_log_contains_aggregated_text(caplog) -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    llm_client = FakeStreamingLlmClient([["answer ", "from llm"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        llm_client=llm_client,
+        llm_enabled=True,
+    )
+    context = _context("conn-log", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-log"), context)
+        await _drain_loop()
+
+    logger_name = "txuw_xiaoai_server.xiaoai_handlers.services.tts_replacement_coordinator"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        asyncio.run(scenario())
+
+    completed_records = [
+        record for record in caplog.records if record.msg == "llm.stream.completed"
+    ]
+
+    assert len(completed_records) == 1
+    assert getattr(completed_records[0], "fullText") == "answer from llm"
 
 
 def test_final_asr_can_start_llm_stream_without_query() -> None:
