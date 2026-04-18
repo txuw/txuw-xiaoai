@@ -7,17 +7,27 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from txuw_xiaoai_server.app import create_app
+from txuw_xiaoai_server.xiaoai_handlers import XiaoAiApplication
+
+
+def _create_test_client() -> TestClient:
+    application = XiaoAiApplication(
+        engine_factory=lambda: None,  # type: ignore[arg-type]
+        interrupter_factory=lambda _context: None,  # type: ignore[arg-type]
+        enabled=False,
+    )
+    return TestClient(create_app(application))
 
 
 def test_healthz() -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
 def test_websocket_accepts_valid_text_message() -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     with client.websocket_connect("/ws") as websocket:
         websocket.send_text(
             json.dumps({"Event": {"id": "1", "event": "playing", "data": "Idle"}})
@@ -25,7 +35,7 @@ def test_websocket_accepts_valid_text_message() -> None:
 
 
 def test_websocket_accepts_valid_binary_stream() -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     with client.websocket_connect("/ws") as websocket:
         websocket.send_bytes(
             json.dumps({"id": "2", "tag": "record", "bytes": [1, 2, 3], "data": None}).encode()
@@ -33,7 +43,7 @@ def test_websocket_accepts_valid_binary_stream() -> None:
 
 
 def test_websocket_closes_on_invalid_payload() -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     with client.websocket_connect("/ws") as websocket:
         websocket.send_text(json.dumps({"Unknown": {"id": "bad"}}))
         try:
@@ -45,7 +55,7 @@ def test_websocket_closes_on_invalid_payload() -> None:
 
 
 def test_logs_structured_event_summary(caplog) -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     with caplog.at_level(logging.INFO):
         with client.websocket_connect("/ws") as websocket:
             websocket.send_text(
@@ -69,7 +79,7 @@ def test_logs_structured_event_summary(caplog) -> None:
 
 
 def test_logs_degraded_instruction_summary(caplog) -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     instruction = {
         "header": {
             "dialog_id": "dialog-1",
@@ -104,7 +114,7 @@ def test_logs_degraded_instruction_summary(caplog) -> None:
 
 
 def test_logs_full_raw_ingress_text_line(caplog) -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     raw_message = json.dumps({"Event": {"id": "1", "event": "playing", "data": "Idle"}})
     with caplog.at_level(logging.INFO):
         with client.websocket_connect("/ws") as websocket:
@@ -119,7 +129,7 @@ def test_logs_full_raw_ingress_text_line(caplog) -> None:
 
 
 def test_logs_binary_ingress_with_length_and_preview(caplog) -> None:
-    client = TestClient(create_app())
+    client = _create_test_client()
     raw_message = json.dumps({"id": "2", "tag": "record", "bytes": [1, 2, 3], "data": None}).encode()
     with caplog.at_level(logging.INFO):
         with client.websocket_connect("/ws") as websocket:

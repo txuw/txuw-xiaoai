@@ -6,13 +6,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from txuw_xiaoai_server.app import create_app
+from txuw_xiaoai_server.xiaoai_handlers import XiaoAiApplication
 
 from .dataset_utils import load_all_datasets
 
 
 @pytest.mark.parametrize("dataset", load_all_datasets(), ids=lambda item: item.name)
 def test_dataset_replay_over_websocket(dataset, caplog) -> None:
-    client = TestClient(create_app())
+    application = XiaoAiApplication(
+        engine_factory=lambda: None,  # type: ignore[arg-type]
+        interrupter_factory=lambda _context: None,  # type: ignore[arg-type]
+        enabled=False,
+    )
+    client = TestClient(create_app(application))
 
     with caplog.at_level(logging.INFO):
         with client.websocket_connect("/ws") as websocket:
