@@ -64,7 +64,7 @@ class FakeInterrupter:
         return True
 
 
-class FakeStreamingLlmClient:
+class FakeAgentService:
     def __init__(self, responses: list[list[str]] | None = None) -> None:
         self._responses = list(responses or [])
         self.prompts: list[str] = []
@@ -84,7 +84,7 @@ class FakeStreamingLlmClient:
         self.close_calls += 1
 
 
-class BlockingStreamingLlmClient:
+class BlockingAgentService:
     def __init__(self, first_delta: str = "streaming") -> None:
         self.first_delta = first_delta
         self.prompts: list[str] = []
@@ -126,15 +126,15 @@ def _create_application(
     engine: FakeEngine,
     interrupter: FakeInterrupter,
     enabled: bool = True,
-    llm_client: FakeStreamingLlmClient | BlockingStreamingLlmClient | None = None,
-    llm_enabled: bool = False,
+    agent_service: FakeAgentService | BlockingAgentService | None = None,
+    agent_enabled: bool = False,
 ) -> XiaoAiApplication:
     return XiaoAiApplication(
         engine_factory=lambda: engine,
         interrupter_factory=lambda _context: interrupter,
         enabled=enabled,
-        llm_client=llm_client,
-        llm_enabled=llm_enabled,
+        agent_service=agent_service,
+        agent_enabled=agent_enabled,
     )
 
 
@@ -274,17 +274,124 @@ def test_interrupt_happens_before_first_non_empty_tts_chunk() -> None:
     assert engine.pushed_texts == ["fresh"]
 
 
-def test_query_starts_llm_stream_and_forwards_text_to_tts() -> None:
+def test_application_speak_text_starts_tts_for_new_dialog() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    llm_client = FakeStreamingLlmClient([["answer ", "from llm"]])
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-proactive", transport)
+
+    async def scenario() -> None:
+        await application.speak_text(
+            context,
+            dialog_id="dialog-proactive",
+            text="正在查询天气",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert interrupter.calls == [("conn-proactive", "dialog-proactive")]
+    assert transport.ensure_started_calls == 1
+    assert engine.started is True
+    assert engine.pushed_texts == ["正在查询天气"]
+
+
+def test_application_speak_text_reuses_same_dialog_session() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-proactive-reuse", transport)
+
+    async def scenario() -> None:
+        await application.speak_text(
+            context,
+            dialog_id="dialog-proactive-reuse",
+            text="正在查询天气",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+        await _drain_loop()
+        await application.speak_text(
+            context,
+            dialog_id="dialog-proactive-reuse",
+            text="正在获取结果",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert interrupter.calls == [("conn-proactive-reuse", "dialog-proactive-reuse")]
+    assert transport.ensure_started_calls == 1
+    assert engine.pushed_texts == ["正在查询天气", "正在获取结果"]
+
+
+def test_application_speak_text_ignores_blank_text() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-proactive-blank", transport)
+
+    asyncio.run(
+        application.speak_text(
+            context,
+            dialog_id="dialog-proactive-blank",
+            text="   ",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+    )
+
+    assert interrupter.calls == []
+    assert transport.ensure_started_calls == 0
+    assert engine.started is False
+    assert engine.pushed_texts == []
+
+
+def test_application_speak_text_marks_dialog_as_server_owned() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-proactive-owned", transport)
+
+    async def scenario() -> None:
+        await application.speak_text(
+            context,
+            dialog_id="dialog-proactive-owned",
+            text="正在查询天气",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+        await _drain_loop()
+        await application.handle_inbound(
+            _speak_message("SpeakStream", "legacy text", "dialog-proactive-owned"),
+            context,
+        )
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert engine.pushed_texts == ["正在查询天气"]
+
+
+def test_query_starts_agent_stream_and_forwards_text_to_tts() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = FakeAgentService([["answer ", "from agent"]])
     application = _create_application(
         engine=engine,
         interrupter=interrupter,
         enabled=True,
-        llm_client=llm_client,
-        llm_enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
     )
     context = _context("conn-query", transport)
 
@@ -294,25 +401,25 @@ def test_query_starts_llm_stream_and_forwards_text_to_tts() -> None:
 
     asyncio.run(scenario())
 
-    assert llm_client.prompts == ["weather"]
+    assert agent_service.prompts == ["weather"]
     assert interrupter.calls == [("conn-query", "dialog-query")]
     assert transport.ensure_started_calls == 1
     assert engine.started is True
-    assert engine.pushed_texts == ["answer ", "from llm"]
+    assert engine.pushed_texts == ["answer ", "from agent"]
     assert engine.completed == 1
 
 
-def test_llm_completed_log_contains_aggregated_text(caplog) -> None:
+def test_agent_completed_log_contains_aggregated_text(caplog) -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    llm_client = FakeStreamingLlmClient([["answer ", "from llm"]])
+    agent_service = FakeAgentService([["answer ", "from agent"]])
     application = _create_application(
         engine=engine,
         interrupter=interrupter,
         enabled=True,
-        llm_client=llm_client,
-        llm_enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
     )
     context = _context("conn-log", transport)
 
@@ -325,24 +432,24 @@ def test_llm_completed_log_contains_aggregated_text(caplog) -> None:
         asyncio.run(scenario())
 
     completed_records = [
-        record for record in caplog.records if record.msg == "llm.stream.completed"
+        record for record in caplog.records if record.msg == "agent.stream.completed"
     ]
 
     assert len(completed_records) == 1
-    assert getattr(completed_records[0], "fullText") == "answer from llm"
+    assert getattr(completed_records[0], "fullText") == "answer from agent"
 
 
-def test_final_asr_can_start_llm_stream_without_query() -> None:
+def test_final_asr_can_start_agent_stream_without_query() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    llm_client = FakeStreamingLlmClient([["fallback answer"]])
+    agent_service = FakeAgentService([["fallback answer"]])
     application = _create_application(
         engine=engine,
         interrupter=interrupter,
         enabled=True,
-        llm_client=llm_client,
-        llm_enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
     )
     context = _context("conn-asr", transport)
 
@@ -355,23 +462,60 @@ def test_final_asr_can_start_llm_stream_without_query() -> None:
 
     asyncio.run(scenario())
 
-    assert llm_client.prompts == ["recognized text"]
+    assert agent_service.prompts == ["recognized text"]
     assert transport.ensure_started_calls == 1
     assert engine.pushed_texts == ["fallback answer"]
     assert engine.completed == 1
+
+
+def test_application_speak_text_can_append_while_agent_stream_is_running() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = BlockingAgentService(first_delta="agent streaming")
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+    )
+    context = _context("conn-tool", transport)
+
+    async def scenario() -> bool:
+        await application.handle_inbound(_query_message("weather", "dialog-tool"), context)
+        await agent_service.started.wait()
+        await _drain_loop(2)
+        await application.speak_text(
+            context,
+            dialog_id="dialog-tool",
+            text="正在查询天气",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+        await _drain_loop(2)
+        cancelled_before_cleanup = agent_service.cancelled.is_set()
+        await application.on_disconnect(context)
+        return cancelled_before_cleanup
+
+    cancelled_before_cleanup = asyncio.run(scenario())
+
+    assert cancelled_before_cleanup is False
+    assert engine.pushed_texts == ["agent streaming", "正在查询天气"]
+    assert agent_service.cancelled.is_set()
 
 
 def test_server_owned_dialog_ignores_legacy_speech_messages() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    llm_client = FakeStreamingLlmClient([["proxy answer"]])
+    agent_service = FakeAgentService([["proxy answer"]])
     application = _create_application(
         engine=engine,
         interrupter=interrupter,
         enabled=True,
-        llm_client=llm_client,
-        llm_enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
     )
     context = _context("conn-owned", transport)
 
@@ -388,17 +532,17 @@ def test_server_owned_dialog_ignores_legacy_speech_messages() -> None:
     assert engine.completed == 1
 
 
-def test_empty_or_whitespace_llm_deltas_are_not_forwarded() -> None:
+def test_empty_or_whitespace_agent_deltas_are_not_forwarded() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    llm_client = FakeStreamingLlmClient([["", "   ", "hello", "\n", "world"]])
+    agent_service = FakeAgentService([["", "   ", "hello", "\n", "world"]])
     application = _create_application(
         engine=engine,
         interrupter=interrupter,
         enabled=True,
-        llm_client=llm_client,
-        llm_enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
     )
     context = _context("conn-delta", transport)
 
@@ -412,23 +556,57 @@ def test_empty_or_whitespace_llm_deltas_are_not_forwarded() -> None:
     assert transport.audio_chunks == [b"hello", b"world"]
 
 
-def test_disconnect_cancels_llm_task_and_closes_engine() -> None:
+def test_application_speak_text_skips_sealed_dialog() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    llm_client = BlockingStreamingLlmClient()
+    agent_service = FakeAgentService([["agent answer"]])
     application = _create_application(
         engine=engine,
         interrupter=interrupter,
         enabled=True,
-        llm_client=llm_client,
-        llm_enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+    )
+    context = _context("conn-sealed", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-sealed"), context)
+        await _drain_loop()
+        await application.speak_text(
+            context,
+            dialog_id="dialog-sealed",
+            text="正在查询天气",
+            instruction_name="ToolCallStatus",
+            source="tool",
+        )
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert interrupter.calls == [("conn-sealed", "dialog-sealed")]
+    assert transport.ensure_started_calls == 1
+    assert engine.pushed_texts == ["agent answer"]
+    assert engine.completed == 1
+
+
+def test_disconnect_cancels_agent_task_and_closes_engine() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = BlockingAgentService()
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
     )
     context = _context("conn-close", transport)
 
     async def scenario() -> None:
         await application.handle_inbound(_query_message("weather", "dialog-close"), context)
-        await llm_client.started.wait()
+        await agent_service.started.wait()
         await _drain_loop(2)
         await application.on_disconnect(context)
 
@@ -436,7 +614,7 @@ def test_disconnect_cancels_llm_task_and_closes_engine() -> None:
 
     assert engine.started is True
     assert engine.closed == 1
-    assert llm_client.cancelled.is_set()
+    assert agent_service.cancelled.is_set()
 
 
 def test_transport_ensure_started_sends_start_play_request() -> None:

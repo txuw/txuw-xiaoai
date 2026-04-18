@@ -5,12 +5,8 @@ import contextlib
 import logging
 from collections.abc import Callable
 
-from ..ports import (
-    ConnectionContext,
-    LegacyAudioInterrupter,
-    StreamingLlmClient,
-    StreamingTtsEngine,
-)
+from ..agent import AgentStreamService
+from ..ports import ConnectionContext, LegacyAudioInterrupter, StreamingTtsEngine
 from ..sessions import DialogSessionState, DialogSessionStore
 
 
@@ -18,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class TtsReplacementCoordinator:
-    """协调旧小爱播报打断、LLM 回答与新 TTS 输出。"""
+    """协调旧小爱打断、Agent 输出与新 TTS 播放。"""
 
     def __init__(
         self,
@@ -26,19 +22,19 @@ class TtsReplacementCoordinator:
         *,
         engine_factory: Callable[[], StreamingTtsEngine],
         enabled: bool,
-        llm_client: StreamingLlmClient | None = None,
-        llm_enabled: bool = False,
+        agent_service: AgentStreamService | None = None,
+        agent_enabled: bool = False,
     ) -> None:
         self._session_store = session_store
         self._engine_factory = engine_factory
         self._enabled = enabled
-        self._llm_client = llm_client
-        self._llm_enabled = llm_enabled and llm_client is not None
+        self._agent_service = agent_service
+        self._agent_enabled = agent_enabled and agent_service is not None
 
     async def close(self) -> None:
-        if self._llm_client is None:
+        if self._agent_service is None:
             return
-        await self._llm_client.close()
+        await self._agent_service.close()
 
     def is_server_owned(self, connection_id: str, dialog_id: str) -> bool:
         session = self._session_store.get(connection_id, dialog_id)
@@ -58,21 +54,21 @@ class TtsReplacementCoordinator:
 
         if not text:
             return
-        if not self._llm_enabled:
+        if not self._agent_enabled:
             logger.info(
-                "llm.stream.skipped",
+                "agent.stream.skipped",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
                     "instructionName": instruction_name,
                     "source": "query",
                     "status": "disabled",
-                    "summary": "llm proxy disabled",
+                    "summary": "agent output disabled",
                 },
             )
             return
 
-        await self._start_llm_dialog(
+        await self._start_agent_dialog(
             context,
             interrupter,
             dialog_id=dialog_id,
@@ -97,21 +93,21 @@ class TtsReplacementCoordinator:
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
         session.final_asr_text = text
 
-        if not self._llm_enabled:
+        if not self._agent_enabled:
             logger.info(
-                "llm.stream.skipped",
+                "agent.stream.skipped",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
                     "instructionName": instruction_name,
                     "source": "asr",
                     "status": "disabled",
-                    "summary": "llm proxy disabled",
+                    "summary": "agent output disabled",
                 },
             )
             return
 
-        await self._start_llm_dialog(
+        await self._start_agent_dialog(
             context,
             interrupter,
             dialog_id=dialog_id,
@@ -154,20 +150,78 @@ class TtsReplacementCoordinator:
             return
 
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
-        await self._ensure_tts_session_started(context, dialog_id, session)
-
-        assert session.engine is not None
-        await session.engine.push_text(text)
-        logger.info(
-            "tts.text.forwarded",
-            extra={
-                "connectionId": context.connection_id,
-                "dialogId": dialog_id,
-                "instructionName": instruction_name,
-                "source": "legacy",
-                "summary": f"text={_truncate_text(text)}",
-            },
+        await self._push_session_text(
+            context=context,
+            dialog_id=dialog_id,
+            session=session,
+            instruction_name=instruction_name,
+            source="legacy",
+            text=text,
         )
+
+    async def speak_text(
+        self,
+        context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
+        *,
+        dialog_id: str,
+        instruction_name: str,
+        source: str,
+        text: str,
+    ) -> None:
+        if not text or not text.strip():
+            return
+
+        if not (self._enabled or self._agent_enabled):
+            logger.info(
+                "tts.text.skipped",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "disabled",
+                    "summary": "server proactive tts disabled",
+                },
+            )
+            return
+
+        session = self._session_store.get_or_create(context.connection_id, dialog_id)
+        if session.sealed:
+            logger.info(
+                "tts.text.skipped",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "sealed",
+                    "summary": "dialog already sealed",
+                },
+            )
+            return
+
+        await self.prime_dialog(
+            context,
+            interrupter,
+            dialog_id=dialog_id,
+            instruction_name=instruction_name,
+        )
+
+        forwarded = await self._push_session_text(
+            context=context,
+            dialog_id=dialog_id,
+            session=session,
+            instruction_name=instruction_name,
+            source=source,
+            text=text,
+            mark_server_owned_after_push=True,
+        )
+        if not forwarded:
+            return
+
+        # v1 的主动播报主要用于在同一 dialog 中插入 Tool 前置提示，
+        # 播报后通常还会继续有 Agent 文本进入，所以这里不自动 complete 当前 TTS 会话。
 
     async def prime_dialog(
         self,
@@ -177,7 +231,7 @@ class TtsReplacementCoordinator:
         dialog_id: str,
         instruction_name: str,
     ) -> None:
-        if not (self._enabled or self._llm_enabled):
+        if not (self._enabled or self._agent_enabled):
             return
 
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
@@ -215,10 +269,13 @@ class TtsReplacementCoordinator:
 
     async def complete(self, connection_id: str, dialog_id: str) -> None:
         session = self._session_store.get(connection_id, dialog_id)
-        if session is None or session.sealed or session.engine is None:
+        if session is None or session.engine is None:
             return
-        await session.engine.complete()
-        session.sealed = True
+        async with session.tts_write_lock:
+            if session.sealed or session.engine is None:
+                return
+            await session.engine.complete()
+            session.sealed = True
 
     async def cleanup_dialog(self, connection_id: str, dialog_id: str) -> None:
         session = self._session_store.remove(connection_id, dialog_id)
@@ -231,7 +288,7 @@ class TtsReplacementCoordinator:
         for session in sessions:
             await self._close_session(session)
 
-    async def _start_llm_dialog(
+    async def _start_agent_dialog(
         self,
         context: ConnectionContext,
         interrupter: LegacyAudioInterrupter,
@@ -242,21 +299,16 @@ class TtsReplacementCoordinator:
         source: str,
     ) -> None:
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
-        if session.server_owned or session.llm_task is not None:
+        if session.server_owned or session.agent_task is not None:
             return
 
-        session.server_owned = True
-        session.llm_full_text = ""
-        logger.info(
-            "dialog.server_owned",
-            extra={
-                "connectionId": context.connection_id,
-                "dialogId": dialog_id,
-                "instructionName": instruction_name,
-                "source": source,
-                "status": "ok",
-                "summary": f"server owned dialog source={source}",
-            },
+        session.agent_full_text = ""
+        self._mark_server_owned(
+            context=context,
+            dialog_id=dialog_id,
+            session=session,
+            instruction_name=instruction_name,
+            source=source,
         )
 
         await self.prime_dialog(
@@ -268,7 +320,7 @@ class TtsReplacementCoordinator:
         await self._ensure_tts_session_started(context, dialog_id, session)
 
         task = asyncio.create_task(
-            self._run_llm_stream(
+            self._run_agent_stream(
                 context=context,
                 dialog_id=dialog_id,
                 instruction_name=instruction_name,
@@ -276,7 +328,7 @@ class TtsReplacementCoordinator:
                 source=source,
             )
         )
-        session.llm_task = task
+        session.agent_task = task
 
     async def _ensure_tts_session_started(
         self,
@@ -301,14 +353,18 @@ class TtsReplacementCoordinator:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        llm_task = session.llm_task
-        if llm_task is not None and not llm_task.done():
-            llm_task.cancel()
+        agent_task = session.agent_task
+        if agent_task is not None and not agent_task.done():
+            # 先取消 Agent 任务，再关闭 TTS，会更容易保证不会有晚到的文本继续写入已关闭的音频会话。
+            agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await llm_task
+                await agent_task
 
         if session.engine is not None:
-            await session.engine.close()
+            async with session.tts_write_lock:
+                session.sealed = True
+                if session.engine is not None:
+                    await session.engine.close()
 
     async def _run_interrupt_task(
         self,
@@ -350,7 +406,7 @@ class TtsReplacementCoordinator:
         )
         return interrupted
 
-    async def _run_llm_stream(
+    async def _run_agent_stream(
         self,
         *,
         context: ConnectionContext,
@@ -361,7 +417,7 @@ class TtsReplacementCoordinator:
     ) -> None:
         current_task = asyncio.current_task()
         logger.info(
-            "llm.stream.started",
+            "agent.stream.started",
             extra={
                 "connectionId": context.connection_id,
                 "dialogId": dialog_id,
@@ -373,21 +429,29 @@ class TtsReplacementCoordinator:
         )
 
         try:
-            assert self._llm_client is not None
-            session = self._session_store.get(context.connection_id, dialog_id)
-            async for delta in self._llm_client.stream_text(prompt):
+            assert self._agent_service is not None
+            async for delta in self._agent_service.stream_text(prompt):
                 if not delta or not delta.strip():
                     continue
 
                 session = self._session_store.get(context.connection_id, dialog_id)
-                if session is None or session.engine is None:
+                if session is None:
                     return
 
-                session.llm_full_text += delta
-                await session.engine.push_text(delta)
+                session.agent_full_text += delta
+                forwarded = await self._push_session_text(
+                    context=context,
+                    dialog_id=dialog_id,
+                    session=session,
+                    instruction_name=instruction_name,
+                    source=source,
+                    text=delta,
+                )
+                if not forwarded:
+                    return
                 summary = f"text={_truncate_text(delta)}"
                 logger.info(
-                    "llm.stream.delta",
+                    "agent.stream.delta",
                     extra={
                         "connectionId": context.connection_id,
                         "dialogId": dialog_id,
@@ -397,66 +461,136 @@ class TtsReplacementCoordinator:
                         "summary": summary,
                     },
                 )
-                logger.info(
-                    "tts.text.forwarded",
-                    extra={
-                        "connectionId": context.connection_id,
-                        "dialogId": dialog_id,
-                        "instructionName": instruction_name,
-                        "source": source,
-                        "summary": summary,
-                    },
-                )
-
             await self.complete(context.connection_id, dialog_id)
             session = self._session_store.get(context.connection_id, dialog_id)
             logger.info(
-                "llm.stream.completed",
+                "agent.stream.completed",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
-                    "fullText": _truncate_text(_get_llm_full_text(session), limit=500),
+                    "fullText": _truncate_text(_get_agent_full_text(session), limit=500),
                     "instructionName": instruction_name,
                     "source": source,
                     "status": "completed",
-                    "summary": "llm stream completed",
+                    "summary": "agent stream completed",
                 },
             )
         except asyncio.CancelledError:
             session = self._session_store.get(context.connection_id, dialog_id)
             logger.info(
-                "llm.stream.cancelled",
+                "agent.stream.cancelled",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
-                    "fullText": _truncate_text(_get_llm_full_text(session), limit=500),
+                    "fullText": _truncate_text(_get_agent_full_text(session), limit=500),
                     "instructionName": instruction_name,
                     "source": source,
                     "status": "cancelled",
-                    "summary": "llm stream cancelled",
+                    "summary": "agent stream cancelled",
                 },
             )
             raise
         except Exception:
             session = self._session_store.get(context.connection_id, dialog_id)
             logger.exception(
-                "llm.stream.failed",
+                "agent.stream.failed",
                 extra={
                     "connectionId": context.connection_id,
                     "dialogId": dialog_id,
-                    "fullText": _truncate_text(_get_llm_full_text(session), limit=500),
+                    "fullText": _truncate_text(_get_agent_full_text(session), limit=500),
                     "instructionName": instruction_name,
                     "source": source,
                     "status": "error",
-                    "summary": "llm stream failed",
+                    "summary": "agent stream failed",
                 },
             )
             with contextlib.suppress(Exception):
                 await self.complete(context.connection_id, dialog_id)
         finally:
             session = self._session_store.get(context.connection_id, dialog_id)
-            if session is not None and session.llm_task is current_task:
-                session.llm_task = None
+            if session is not None and session.agent_task is current_task:
+                session.agent_task = None
+
+    def _mark_server_owned(
+        self,
+        *,
+        context: ConnectionContext,
+        dialog_id: str,
+        session: DialogSessionState,
+        instruction_name: str,
+        source: str,
+    ) -> None:
+        if session.server_owned:
+            return
+
+        session.server_owned = True
+        logger.info(
+            "dialog.server_owned",
+            extra={
+                "connectionId": context.connection_id,
+                "dialogId": dialog_id,
+                "instructionName": instruction_name,
+                "source": source,
+                "status": "ok",
+                "summary": f"server owned dialog source={source}",
+            },
+        )
+
+    async def _push_session_text(
+        self,
+        *,
+        context: ConnectionContext,
+        dialog_id: str,
+        session: DialogSessionState,
+        instruction_name: str,
+        source: str,
+        text: str,
+        mark_server_owned_after_push: bool = False,
+    ) -> bool:
+        async with session.tts_write_lock:
+            if session.sealed:
+                logger.info(
+                    "tts.text.skipped",
+                    extra={
+                        "connectionId": context.connection_id,
+                        "dialogId": dialog_id,
+                        "instructionName": instruction_name,
+                        "source": source,
+                        "status": "sealed",
+                        "summary": "dialog already sealed",
+                    },
+                )
+                return False
+
+            await self._ensure_tts_session_started(context, dialog_id, session)
+            assert session.engine is not None
+
+            # 同一 dialog 的文本可能来自 Agent、旧链路转发和 Tool 前置提示，
+            # 必须统一串行化 push_text，才能避免底层流式 TTS 会话乱序写入。
+            await session.engine.push_text(text)
+
+            if mark_server_owned_after_push:
+                # 服务端一旦成功把文本写进当前 dialog，后续就必须屏蔽设备侧旧播报，
+                # 否则旧链路 SpeakStream 和服务端主动提示会同时落到同一音频输出。
+                self._mark_server_owned(
+                    context=context,
+                    dialog_id=dialog_id,
+                    session=session,
+                    instruction_name=instruction_name,
+                    source=source,
+                )
+
+            logger.info(
+                "tts.text.forwarded",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "summary": f"text={_truncate_text(text)}",
+                },
+            )
+            return True
 
     @staticmethod
     def _session_key(connection_id: str, dialog_id: str) -> str:
@@ -467,7 +601,7 @@ def _truncate_text(value: str, limit: int = 160) -> str:
     return value if len(value) <= limit else f"{value[:limit]}..."
 
 
-def _get_llm_full_text(session: DialogSessionState | None) -> str:
+def _get_agent_full_text(session: DialogSessionState | None) -> str:
     if session is None:
         return ""
-    return session.llm_full_text
+    return session.agent_full_text

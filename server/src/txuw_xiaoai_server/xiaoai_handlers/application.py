@@ -3,22 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from .agent import AgentStreamService
 from .handlers.dialog_lifecycle import DialogLifecycleHandler
 from .handlers.query import QueryHandler
 from .handlers.speech_recognizer import SpeechRecognizerHandler
 from .handlers.speech_synthesizer import SpeechSynthesizerHandler
-from .ports import (
-    ConnectionContext,
-    LegacyAudioInterrupter,
-    StreamingLlmClient,
-    StreamingTtsEngine,
-)
+from .ports import ConnectionContext, LegacyAudioInterrupter, StreamingTtsEngine
 from .services.tts_replacement_coordinator import TtsReplacementCoordinator
 from .sessions import DialogSessionStore
 
 
 class XiaoAiApplication:
-    """小爱播报拦截与 LLM + TTS 的业务入口。"""
+    """小爱播报拦截与 Agent 输出接管的业务入口。"""
 
     def __init__(
         self,
@@ -26,16 +22,16 @@ class XiaoAiApplication:
         engine_factory: Callable[[], StreamingTtsEngine],
         interrupter_factory: Callable[[ConnectionContext], LegacyAudioInterrupter],
         enabled: bool,
-        llm_client: StreamingLlmClient | None = None,
-        llm_enabled: bool = False,
+        agent_service: AgentStreamService | None = None,
+        agent_enabled: bool = False,
     ) -> None:
         session_store = DialogSessionStore()
         coordinator = TtsReplacementCoordinator(
             session_store,
             engine_factory=engine_factory,
             enabled=enabled,
-            llm_client=llm_client,
-            llm_enabled=llm_enabled,
+            agent_service=agent_service,
+            agent_enabled=agent_enabled,
         )
         self._coordinator = coordinator
         self._interrupter_factory = interrupter_factory
@@ -45,7 +41,7 @@ class XiaoAiApplication:
         self._dialog_lifecycle_handlers: dict[str, DialogLifecycleHandler] = {}
 
     async def handle_inbound(self, message: Any, context: ConnectionContext) -> None:
-        """在应用层直接完成分发，避免额外中间层增加理解成本。"""
+        """应用层直接分发消息，避免额外中间层增加理解成本。"""
 
         if getattr(message, "message_type", None) == "response":
             return
@@ -70,6 +66,25 @@ class XiaoAiApplication:
         self._speech_synthesizer_handlers.pop(context.connection_id, None)
         self._dialog_lifecycle_handlers.pop(context.connection_id, None)
         await self._coordinator.cleanup_connection(context.connection_id)
+
+    async def speak_text(
+        self,
+        context: ConnectionContext,
+        *,
+        dialog_id: str,
+        text: str,
+        instruction_name: str = "ServerSpeak",
+        source: str = "proactive",
+    ) -> None:
+        interrupter = self._interrupter_factory(context)
+        await self._coordinator.speak_text(
+            context,
+            interrupter,
+            dialog_id=dialog_id,
+            instruction_name=instruction_name,
+            source=source,
+            text=text,
+        )
 
     async def close(self) -> None:
         await self._coordinator.close()

@@ -27,6 +27,8 @@ class SpeechSynthesizerHandler:
             return False
 
         if self._coordinator.is_server_owned(context.connection_id, header.dialog_id):
+            # 同一个 dialog 一旦改由服务端 Agent 接管，就必须屏蔽旧链路的 SpeakStream，
+            # 否则设备侧原始播报和服务端新播报会同时落到音频输出，造成串音与重复播报。
             return header.name in {"Speak", "SpeakStream", "FinishSpeakStream"}
 
         if header.name in {"Speak", "SpeakStream"}:

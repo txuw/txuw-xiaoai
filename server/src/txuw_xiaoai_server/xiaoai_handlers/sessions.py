@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .ports import StreamingTtsEngine
 
 
 @dataclass(slots=True)
 class DialogSessionState:
-    """单轮对话中的 TTS 替换状态。"""
+    """单轮对话中的 TTS 接管状态。"""
 
     connection_id: str
     dialog_id: str
@@ -20,9 +20,12 @@ class DialogSessionState:
     query_text: str = ""
     final_asr_text: str = ""
     server_owned: bool = False
-    llm_task: asyncio.Task[None] | None = None
-    llm_full_text: str = ""
+    agent_task: asyncio.Task[None] | None = None
+    agent_full_text: str = ""
     engine: StreamingTtsEngine | None = None
+    # 同一 dialog 的文本可能同时来自 Agent 增量、旧链路转发和服务端主动播报，
+    # 统一串行化写入可以避免底层流式 TTS 会话出现乱序或在 complete 后继续写入。
+    tts_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class DialogSessionStore:

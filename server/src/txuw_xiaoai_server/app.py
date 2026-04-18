@@ -19,12 +19,9 @@ from .socket_logging import (
 )
 from .transport import ClientSessionTransport
 from .xiaoai_handlers import ConnectionContext, DashScopeStreamingTtsConfig, XiaoAiApplication
+from .xiaoai_handlers.agent import AgentStreamConfig, AgentStreamService
 from .xiaoai_handlers.services.dashscope_streaming_tts import DashScopeStreamingTtsEngine
 from .xiaoai_handlers.services.legacy_audio_interrupt import AbortLegacyXiaoaiInterrupter
-from .xiaoai_handlers.services.openai_streaming_llm import (
-    OpenAiCompatibleLlmConfig,
-    OpenAiCompatibleStreamingClient,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -210,7 +207,7 @@ async def _dispatch_inbound_payload(
 def _build_application() -> XiaoAiApplication:
     dashscope_configured = bool(settings.dashscope_api_key)
     legacy_enabled = settings.tts_intercept_enabled and dashscope_configured
-    llm_enabled = (
+    agent_enabled = (
         settings.llm_proxy_enabled
         and dashscope_configured
         and bool(settings.llm_api_key)
@@ -230,17 +227,17 @@ def _build_application() -> XiaoAiApplication:
         },
     )
     logger.info(
-        "llm.proxy.bootstrap",
+        "agent.output.bootstrap",
         extra={
             "llmProxyEnabled": settings.llm_proxy_enabled,
             "llmApiKeyConfigured": bool(settings.llm_api_key),
             "llmBaseUrlConfigured": bool(settings.llm_base_url),
             "dashscopeApiKeyConfigured": dashscope_configured,
-            "status": "enabled" if llm_enabled else "disabled",
+            "status": "enabled" if agent_enabled else "disabled",
             "summary": (
-                "llm proxy enabled"
-                if llm_enabled
-                else "llm proxy disabled: check LLM_PROXY_ENABLED, LLM_API_KEY and DASHSCOPE_API_KEY"
+                "agent output enabled"
+                if agent_enabled
+                else "agent output disabled: check LLM_PROXY_ENABLED, LLM_API_KEY and DASHSCOPE_API_KEY"
             ),
         },
     )
@@ -251,10 +248,10 @@ def _build_application() -> XiaoAiApplication:
         voice=settings.dashscope_tts_voice,
     )
 
-    llm_client = None
-    if llm_enabled:
-        llm_client = OpenAiCompatibleStreamingClient(
-            OpenAiCompatibleLlmConfig(
+    agent_service = None
+    if agent_enabled:
+        agent_service = AgentStreamService(
+            AgentStreamConfig(
                 api_key=settings.llm_api_key,
                 base_url=settings.llm_base_url,
                 model=settings.llm_model,
@@ -271,6 +268,6 @@ def _build_application() -> XiaoAiApplication:
             command=settings.legacy_interrupt_command,
         ),
         enabled=legacy_enabled,
-        llm_client=llm_client,
-        llm_enabled=llm_enabled,
+        agent_service=agent_service,
+        agent_enabled=agent_enabled,
     )
