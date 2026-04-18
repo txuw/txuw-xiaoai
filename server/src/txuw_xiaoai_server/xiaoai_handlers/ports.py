@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
 
 class AudioChunkSink(Protocol):
-    """音频分片输出端口。"""
+    """音频分片输出接口。"""
 
     async def write(self, data: bytes) -> None:
         """输出一段可播放音频数据。"""
 
 
 class PlaybackControlPort(Protocol):
-    """远端播放控制端口。"""
+    """远端播放控制接口。"""
 
     async def ensure_started(self) -> None:
         """确保远端播放链路已启动。"""
@@ -38,6 +39,16 @@ class StreamingTtsEngine(Protocol):
 
     async def close(self) -> None:
         """关闭并释放当前会话资源。"""
+
+
+class StreamingLlmClient(Protocol):
+    """流式文本生成接口。"""
+
+    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+        """按到达顺序返回文本增量。"""
+
+    async def close(self) -> None:
+        """关闭并释放模型客户端资源。"""
 
 
 class LegacyAudioInterrupter(Protocol):

@@ -15,7 +15,12 @@ class DialogSessionState:
     legacy_interrupted: bool = False
     legacy_interrupt_task: asyncio.Task[bool] | None = None
     tts_started: bool = False
+    playback_started: bool = False
     sealed: bool = False
+    query_text: str = ""
+    final_asr_text: str = ""
+    server_owned: bool = False
+    llm_task: asyncio.Task[None] | None = None
     engine: StreamingTtsEngine | None = None
 
 

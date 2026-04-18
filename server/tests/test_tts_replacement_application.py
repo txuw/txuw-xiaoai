@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from typing import Any
 
 from txuw_xiaoai_server.protocol import InboundResponse, ResponseBody, parse_text_message
 from txuw_xiaoai_server.transport import ClientSessionTransport
@@ -9,8 +11,6 @@ from txuw_xiaoai_server.xiaoai_handlers import ConnectionContext, XiaoAiApplicat
 
 
 class FakeTransport:
-    """测试用传输层桩对象。"""
-
     def __init__(self) -> None:
         self.ensure_started_calls = 0
         self.stop_calls = 0
@@ -32,8 +32,6 @@ class FakeTransport:
 
 
 class FakeEngine:
-    """测试用 TTS 引擎。"""
-
     def __init__(self) -> None:
         self.started = False
         self.completed = 0
@@ -57,8 +55,6 @@ class FakeEngine:
 
 
 class FakeInterrupter:
-    """测试用旧播报中断器。"""
-
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
@@ -67,9 +63,52 @@ class FakeInterrupter:
         return True
 
 
-class FakeWebSocket:
-    """捕获 transport 发出的请求与音频帧。"""
+class FakeStreamingLlmClient:
+    def __init__(self, responses: list[list[str]] | None = None) -> None:
+        self._responses = list(responses or [])
+        self.prompts: list[str] = []
+        self.close_calls = 0
 
+    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+        async def generator() -> AsyncIterator[str]:
+            self.prompts.append(prompt)
+            deltas = self._responses.pop(0) if self._responses else []
+            for delta in deltas:
+                await asyncio.sleep(0)
+                yield delta
+
+        return generator()
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class BlockingStreamingLlmClient:
+    def __init__(self, first_delta: str = "streaming") -> None:
+        self.first_delta = first_delta
+        self.prompts: list[str] = []
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+        async def generator() -> AsyncIterator[str]:
+            self.prompts.append(prompt)
+            self.started.set()
+            yield self.first_delta
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+        return generator()
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeWebSocket:
     def __init__(self) -> None:
         self.text_messages: list[str] = []
         self.binary_messages: list[bytes] = []
@@ -81,10 +120,38 @@ class FakeWebSocket:
         self.binary_messages.append(data)
 
 
-def _instruction_message(name: str, text: str, dialog_id: str = "dialog-1"):
-    payload: dict[str, object] = {}
-    if name in {"Speak", "SpeakStream"}:
-        payload = {"text": text}
+def _create_application(
+    *,
+    engine: FakeEngine,
+    interrupter: FakeInterrupter,
+    enabled: bool = True,
+    llm_client: FakeStreamingLlmClient | BlockingStreamingLlmClient | None = None,
+    llm_enabled: bool = False,
+) -> XiaoAiApplication:
+    return XiaoAiApplication(
+        engine_factory=lambda: engine,
+        interrupter_factory=lambda _context: interrupter,
+        enabled=enabled,
+        llm_client=llm_client,
+        llm_enabled=llm_enabled,
+    )
+
+
+def _context(connection_id: str, transport: FakeTransport) -> ConnectionContext:
+    return ConnectionContext(
+        connection_id=connection_id,
+        playback_port=transport,
+        audio_sink=transport,
+    )
+
+
+def _instruction_message(
+    name: str,
+    *,
+    namespace: str,
+    payload: dict[str, Any] | None = None,
+    dialog_id: str = "dialog-1",
+):
     return parse_text_message(
         json.dumps(
             {
@@ -98,9 +165,9 @@ def _instruction_message(name: str, text: str, dialog_id: str = "dialog-1"):
                                     "dialog_id": dialog_id,
                                     "id": f"{name}-inner-id",
                                     "name": name,
-                                    "namespace": "SpeechSynthesizer",
+                                    "namespace": namespace,
                                 },
-                                "payload": payload,
+                                "payload": payload or {},
                             }
                         )
                     },
@@ -110,25 +177,56 @@ def _instruction_message(name: str, text: str, dialog_id: str = "dialog-1"):
     )
 
 
+def _speak_message(name: str, text: str, dialog_id: str = "dialog-1"):
+    return _instruction_message(
+        name,
+        namespace="SpeechSynthesizer",
+        payload={"text": text} if name in {"Speak", "SpeakStream"} else {},
+        dialog_id=dialog_id,
+    )
+
+
+def _query_message(text: str, dialog_id: str = "dialog-1"):
+    return _instruction_message(
+        "Query",
+        namespace="Template",
+        payload={"text": text},
+        dialog_id=dialog_id,
+    )
+
+
+def _recognize_result_message(text: str, *, is_final: bool, dialog_id: str = "dialog-1"):
+    return _instruction_message(
+        "RecognizeResult",
+        namespace="SpeechRecognizer",
+        payload={
+            "is_final": is_final,
+            "is_vad_begin": True,
+            "results": [{"confidence": 0.0, "text": text}],
+        },
+        dialog_id=dialog_id,
+    )
+
+
+async def _drain_loop(turns: int = 5) -> None:
+    for _ in range(turns):
+        await asyncio.sleep(0)
+
+
 async def _run_application_flow() -> tuple[FakeTransport, FakeEngine, FakeInterrupter]:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    application = XiaoAiApplication(
-        engine_factory=lambda: engine,
-        interrupter_factory=lambda _context: interrupter,
-        enabled=True,
-    )
-    context = ConnectionContext(
-        connection_id="conn-1",
-        playback_port=transport,
-        audio_sink=transport,
-    )
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-1", transport)
 
-    await application.handle_inbound(_instruction_message("SpeakStream", "你好，"), context)
-    await application.handle_inbound(_instruction_message("SpeakStream", "主人。"), context)
-    await application.handle_inbound(_instruction_message("FinishSpeakStream", ""), context)
-    await application.handle_inbound(_instruction_message("Finish", ""), context)
+    await application.handle_inbound(_speak_message("SpeakStream", "hello"), context)
+    await application.handle_inbound(_speak_message("SpeakStream", "world"), context)
+    await application.handle_inbound(_speak_message("FinishSpeakStream", ""), context)
+    await application.handle_inbound(
+        _instruction_message("Finish", namespace="Dialog", dialog_id="dialog-1"),
+        context,
+    )
 
     return transport, engine, interrupter
 
@@ -137,9 +235,9 @@ def test_tts_replacement_stream_flow() -> None:
     transport, engine, interrupter = asyncio.run(_run_application_flow())
 
     assert transport.ensure_started_calls == 1
-    assert transport.audio_chunks == ["你好，".encode("utf-8"), "主人。".encode("utf-8")]
+    assert transport.audio_chunks == [b"hello", b"world"]
     assert engine.started is True
-    assert engine.pushed_texts == ["你好，", "主人。"]
+    assert engine.pushed_texts == ["hello", "world"]
     assert engine.completed == 1
     assert engine.closed == 1
     assert interrupter.calls == [("conn-1", "dialog-1")]
@@ -149,18 +247,10 @@ def test_empty_speak_text_is_ignored() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    application = XiaoAiApplication(
-        engine_factory=lambda: engine,
-        interrupter_factory=lambda _context: interrupter,
-        enabled=True,
-    )
-    context = ConnectionContext(
-        connection_id="conn-2",
-        playback_port=transport,
-        audio_sink=transport,
-    )
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-2", transport)
 
-    asyncio.run(application.handle_inbound(_instruction_message("SpeakStream", "", "dialog-2"), context))
+    asyncio.run(application.handle_inbound(_speak_message("SpeakStream", "", "dialog-2"), context))
 
     assert transport.ensure_started_calls == 0
     assert engine.started is False
@@ -171,24 +261,151 @@ def test_interrupt_happens_before_first_non_empty_tts_chunk() -> None:
     transport = FakeTransport()
     engine = FakeEngine()
     interrupter = FakeInterrupter()
-    application = XiaoAiApplication(
-        engine_factory=lambda: engine,
-        interrupter_factory=lambda _context: interrupter,
-        enabled=True,
-    )
-    context = ConnectionContext(
-        connection_id="conn-4",
-        playback_port=transport,
-        audio_sink=transport,
-    )
+    application = _create_application(engine=engine, interrupter=interrupter)
+    context = _context("conn-4", transport)
 
-    asyncio.run(application.handle_inbound(_instruction_message("Speak", "", "dialog-4"), context))
-    asyncio.run(application.handle_inbound(_instruction_message("SpeakStream", "新的播报", "dialog-4"), context))
+    asyncio.run(application.handle_inbound(_speak_message("Speak", "", "dialog-4"), context))
+    asyncio.run(application.handle_inbound(_speak_message("SpeakStream", "fresh", "dialog-4"), context))
 
     assert interrupter.calls == [("conn-4", "dialog-4")]
     assert transport.ensure_started_calls == 1
     assert engine.started is True
-    assert engine.pushed_texts == ["新的播报"]
+    assert engine.pushed_texts == ["fresh"]
+
+
+def test_query_starts_llm_stream_and_forwards_text_to_tts() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    llm_client = FakeStreamingLlmClient([["answer ", "from llm"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        llm_client=llm_client,
+        llm_enabled=True,
+    )
+    context = _context("conn-query", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-query"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert llm_client.prompts == ["weather"]
+    assert interrupter.calls == [("conn-query", "dialog-query")]
+    assert transport.ensure_started_calls == 1
+    assert engine.started is True
+    assert engine.pushed_texts == ["answer ", "from llm"]
+    assert engine.completed == 1
+
+
+def test_final_asr_can_start_llm_stream_without_query() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    llm_client = FakeStreamingLlmClient([["fallback answer"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        llm_client=llm_client,
+        llm_enabled=True,
+    )
+    context = _context("conn-asr", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(
+            _recognize_result_message("recognized text", is_final=True, dialog_id="dialog-asr"),
+            context,
+        )
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert llm_client.prompts == ["recognized text"]
+    assert transport.ensure_started_calls == 1
+    assert engine.pushed_texts == ["fallback answer"]
+    assert engine.completed == 1
+
+
+def test_server_owned_dialog_ignores_legacy_speech_messages() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    llm_client = FakeStreamingLlmClient([["proxy answer"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        llm_client=llm_client,
+        llm_enabled=True,
+    )
+    context = _context("conn-owned", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-owned"), context)
+        await _drain_loop()
+        await application.handle_inbound(_speak_message("SpeakStream", "legacy text", "dialog-owned"), context)
+        await application.handle_inbound(_speak_message("FinishSpeakStream", "", "dialog-owned"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert engine.pushed_texts == ["proxy answer"]
+    assert engine.completed == 1
+
+
+def test_empty_or_whitespace_llm_deltas_are_not_forwarded() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    llm_client = FakeStreamingLlmClient([["", "   ", "hello", "\n", "world"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        llm_client=llm_client,
+        llm_enabled=True,
+    )
+    context = _context("conn-delta", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-delta"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert engine.pushed_texts == ["hello", "world"]
+    assert transport.audio_chunks == [b"hello", b"world"]
+
+
+def test_disconnect_cancels_llm_task_and_closes_engine() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    llm_client = BlockingStreamingLlmClient()
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        llm_client=llm_client,
+        llm_enabled=True,
+    )
+    context = _context("conn-close", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-close"), context)
+        await llm_client.started.wait()
+        await _drain_loop(2)
+        await application.on_disconnect(context)
+
+    asyncio.run(scenario())
+
+    assert engine.started is True
+    assert engine.closed == 1
+    assert llm_client.cancelled.is_set()
 
 
 def test_transport_ensure_started_sends_start_play_request() -> None:

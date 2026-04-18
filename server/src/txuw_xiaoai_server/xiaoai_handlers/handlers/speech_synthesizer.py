@@ -26,11 +26,13 @@ class SpeechSynthesizerHandler:
         if header.namespace != "SpeechSynthesizer":
             return False
 
+        if self._coordinator.is_server_owned(context.connection_id, header.dialog_id):
+            return header.name in {"Speak", "SpeakStream", "FinishSpeakStream"}
+
         if header.name in {"Speak", "SpeakStream"}:
             payload = envelope.payload_model
             text = getattr(payload, "text", "")
 
-            # 旧小爱一进入播报阶段就先尝试打断，优先保证只保留新声音。
             await self._coordinator.prime_dialog(
                 context,
                 self._interrupter,

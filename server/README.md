@@ -52,6 +52,21 @@ LEGACY_INTERRUPT_ENABLED=true
 LEGACY_INTERRUPT_COMMAND=/etc/init.d/mico_aivs_lab restart >/dev/null 2>&1
 ```
 
+## LLM 问答流开关
+
+如需启用 Server 侧 LiteLLM 问答流，请在 `.env` 中补充：
+
+```env
+LLM_PROXY_ENABLED=true
+LLM_API_KEY=sk-xxx
+LLM_BASE_URL=http://your-litellm-host:4000/v1
+LLM_MODEL=gpt-4o-mini
+LLM_TIMEOUT_SECONDS=60
+LLM_SYSTEM_PROMPT=你是一个适合直接口播的中文语音助手。请用自然、简短、口语化的中文回答。只输出纯文本，不要使用 Markdown、列表编号、代码块或表情。
+```
+
+启用后，服务端会优先在收到 `Template.Query` 或最终 ASR 文本时直接调用 LiteLLM 的 OpenAI 兼容接口，并把流式文本直接送入 DashScope `SpeechSynthesizer`。
+
 ## 手动自测
 
 原来的 `demo.py` 已迁移到 `tests/manual`。

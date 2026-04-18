@@ -3,33 +3,47 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette import status
 
+from .config import settings
 from .protocol import InboundMessage, InboundStream, parse_stream_frame, parse_text_message
+from .protocol.models import InboundResponse
 from .socket_logging import (
     build_ingress_binary_log_entry,
     build_ingress_text_log_entry,
     build_socket_log_entry,
 )
-from .config import settings
-from .protocol.models import InboundResponse
 from .transport import ClientSessionTransport
 from .xiaoai_handlers import ConnectionContext, DashScopeStreamingTtsConfig, XiaoAiApplication
 from .xiaoai_handlers.services.dashscope_streaming_tts import DashScopeStreamingTtsEngine
 from .xiaoai_handlers.services.legacy_audio_interrupt import AbortLegacyXiaoaiInterrupter
+from .xiaoai_handlers.services.openai_streaming_llm import (
+    OpenAiCompatibleLlmConfig,
+    OpenAiCompatibleStreamingClient,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 def create_app(application: XiaoAiApplication | None = None) -> FastAPI:
-    """创建服务入口，并把 websocket 主链路集中在同一处。"""
+    """创建服务入口，并把 WebSocket 主链路集中在同一处。"""
 
-    app = FastAPI(title="txuw-xiaoai-server", version="0.1.0")
     app_application = application or _build_application()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                await app_application.close()
+
+    app = FastAPI(title="txuw-xiaoai-server", version="0.1.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -80,20 +94,17 @@ def create_app(application: XiaoAiApplication | None = None) -> FastAPI:
                     )
                     break
 
-                # 文本帧承载事件/指令/响应，是主业务协议入口。
                 if text := message.get("text"):
                     ingress_entry = build_ingress_text_log_entry(text, connection_id)
                     logger.info(ingress_entry.event_name, extra=ingress_entry.to_logger_extra())
                     parsed = parse_text_message(text)
 
-                    # response 只用于 transport 内部请求配对，不进入业务分发。
                     if isinstance(parsed, InboundResponse):
                         transport.accept_response(parsed)
                     else:
                         await queue.put(("text", parsed))
                     continue
 
-                # 二进制帧当前只承载音频流，解析后走同一条异步消费链路。
                 if data := message.get("bytes"):
                     ingress_entry = build_ingress_binary_log_entry(
                         _truncate_binary_preview(data, 160),
@@ -131,7 +142,6 @@ def create_app(application: XiaoAiApplication | None = None) -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError):
                 await processor
 
-            # 断连时先清理业务会话，再终止挂起 RPC，最后回收播放资源。
             context = ConnectionContext(
                 connection_id=connection_id,
                 playback_port=transport,
@@ -198,25 +208,60 @@ async def _dispatch_inbound_payload(
 
 
 def _build_application() -> XiaoAiApplication:
-    enabled = settings.tts_intercept_enabled and bool(settings.dashscope_api_key)
+    dashscope_configured = bool(settings.dashscope_api_key)
+    legacy_enabled = settings.tts_intercept_enabled and dashscope_configured
+    llm_enabled = (
+        settings.llm_proxy_enabled
+        and dashscope_configured
+        and bool(settings.llm_api_key)
+    )
+
     logger.info(
         "tts.replacement.bootstrap",
         extra={
             "ttsInterceptEnabled": settings.tts_intercept_enabled,
-            "dashscopeApiKeyConfigured": bool(settings.dashscope_api_key),
-            "status": "enabled" if enabled else "disabled",
+            "dashscopeApiKeyConfigured": dashscope_configured,
+            "status": "enabled" if legacy_enabled else "disabled",
             "summary": (
                 "tts replacement enabled"
-                if enabled
+                if legacy_enabled
                 else "tts replacement disabled: check TTS_INTERCEPT_ENABLED and DASHSCOPE_API_KEY"
             ),
         },
     )
+    logger.info(
+        "llm.proxy.bootstrap",
+        extra={
+            "llmProxyEnabled": settings.llm_proxy_enabled,
+            "llmApiKeyConfigured": bool(settings.llm_api_key),
+            "llmBaseUrlConfigured": bool(settings.llm_base_url),
+            "dashscopeApiKeyConfigured": dashscope_configured,
+            "status": "enabled" if llm_enabled else "disabled",
+            "summary": (
+                "llm proxy enabled"
+                if llm_enabled
+                else "llm proxy disabled: check LLM_PROXY_ENABLED, LLM_API_KEY and DASHSCOPE_API_KEY"
+            ),
+        },
+    )
+
     tts_config = DashScopeStreamingTtsConfig(
         api_key=settings.dashscope_api_key,
         model=settings.dashscope_tts_model,
         voice=settings.dashscope_tts_voice,
     )
+
+    llm_client = None
+    if llm_enabled:
+        llm_client = OpenAiCompatibleStreamingClient(
+            OpenAiCompatibleLlmConfig(
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
+                model=settings.llm_model,
+                timeout_seconds=settings.llm_timeout_seconds,
+                system_prompt=settings.llm_system_prompt,
+            )
+        )
 
     return XiaoAiApplication(
         engine_factory=lambda: DashScopeStreamingTtsEngine(tts_config),
@@ -225,5 +270,7 @@ def _build_application() -> XiaoAiApplication:
             enabled=settings.legacy_interrupt_enabled,
             command=settings.legacy_interrupt_command,
         ),
-        enabled=enabled,
+        enabled=legacy_enabled,
+        llm_client=llm_client,
+        llm_enabled=llm_enabled,
     )

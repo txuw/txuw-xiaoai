@@ -5,7 +5,12 @@ import contextlib
 import logging
 from collections.abc import Callable
 
-from ..ports import ConnectionContext, LegacyAudioInterrupter, StreamingTtsEngine
+from ..ports import (
+    ConnectionContext,
+    LegacyAudioInterrupter,
+    StreamingLlmClient,
+    StreamingTtsEngine,
+)
 from ..sessions import DialogSessionState, DialogSessionStore
 
 
@@ -13,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class TtsReplacementCoordinator:
-    """协调旧小爱播报打断与新 TTS 替换。"""
+    """协调旧小爱播报打断、LLM 回答与新 TTS 输出。"""
 
     def __init__(
         self,
@@ -21,10 +26,99 @@ class TtsReplacementCoordinator:
         *,
         engine_factory: Callable[[], StreamingTtsEngine],
         enabled: bool,
+        llm_client: StreamingLlmClient | None = None,
+        llm_enabled: bool = False,
     ) -> None:
         self._session_store = session_store
         self._engine_factory = engine_factory
         self._enabled = enabled
+        self._llm_client = llm_client
+        self._llm_enabled = llm_enabled and llm_client is not None
+
+    async def close(self) -> None:
+        if self._llm_client is None:
+            return
+        await self._llm_client.close()
+
+    def is_server_owned(self, connection_id: str, dialog_id: str) -> bool:
+        session = self._session_store.get(connection_id, dialog_id)
+        return bool(session and session.server_owned)
+
+    async def on_query(
+        self,
+        context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
+        *,
+        dialog_id: str,
+        instruction_name: str,
+        text: str,
+    ) -> None:
+        session = self._session_store.get_or_create(context.connection_id, dialog_id)
+        session.query_text = text
+
+        if not text:
+            return
+        if not self._llm_enabled:
+            logger.info(
+                "llm.stream.skipped",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": "query",
+                    "status": "disabled",
+                    "summary": "llm proxy disabled",
+                },
+            )
+            return
+
+        await self._start_llm_dialog(
+            context,
+            interrupter,
+            dialog_id=dialog_id,
+            instruction_name=instruction_name,
+            prompt=text,
+            source="query",
+        )
+
+    async def on_recognize_result(
+        self,
+        context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
+        *,
+        dialog_id: str,
+        instruction_name: str,
+        text: str,
+        is_final: bool,
+    ) -> None:
+        if not is_final or not text:
+            return
+
+        session = self._session_store.get_or_create(context.connection_id, dialog_id)
+        session.final_asr_text = text
+
+        if not self._llm_enabled:
+            logger.info(
+                "llm.stream.skipped",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": "asr",
+                    "status": "disabled",
+                    "summary": "llm proxy disabled",
+                },
+            )
+            return
+
+        await self._start_llm_dialog(
+            context,
+            interrupter,
+            dialog_id=dialog_id,
+            instruction_name=instruction_name,
+            prompt=text,
+            source="asr",
+        )
 
     async def on_text(
         self,
@@ -60,12 +154,7 @@ class TtsReplacementCoordinator:
             return
 
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
-        if not session.tts_started:
-            engine = self._engine_factory()
-            await engine.start(self._session_key(context.connection_id, dialog_id), context.audio_sink)
-            session.engine = engine
-            session.tts_started = True
-            await context.playback_port.ensure_started()
+        await self._ensure_tts_session_started(context, dialog_id, session)
 
         assert session.engine is not None
         await session.engine.push_text(text)
@@ -75,7 +164,8 @@ class TtsReplacementCoordinator:
                 "connectionId": context.connection_id,
                 "dialogId": dialog_id,
                 "instructionName": instruction_name,
-                "summary": f"text={text}",
+                "source": "legacy",
+                "summary": f"text={_truncate_text(text)}",
             },
         )
 
@@ -87,9 +177,7 @@ class TtsReplacementCoordinator:
         dialog_id: str,
         instruction_name: str,
     ) -> None:
-        """尽早异步触发旧小爱打断，不阻塞后续 TTS 文本处理。"""
-
-        if not self._enabled:
+        if not (self._enabled or self._llm_enabled):
             return
 
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
@@ -117,8 +205,6 @@ class TtsReplacementCoordinator:
                     "summary": "legacy xiaoai playback interrupt requested",
                 },
             )
-            # 主动让出一次调度，让中断任务尽快把远端 run_shell 请求发出去，
-            # 但不等待其最终响应，避免阻塞后续 SpeakStream 文本处理。
             await asyncio.sleep(0)
             return
 
@@ -128,8 +214,6 @@ class TtsReplacementCoordinator:
             session.legacy_interrupt_task = None
 
     async def complete(self, connection_id: str, dialog_id: str) -> None:
-        """声明文本输入结束，让实时 TTS 完成收尾。"""
-
         session = self._session_store.get(connection_id, dialog_id)
         if session is None or session.sealed or session.engine is None:
             return
@@ -137,19 +221,77 @@ class TtsReplacementCoordinator:
         session.sealed = True
 
     async def cleanup_dialog(self, connection_id: str, dialog_id: str) -> None:
-        """清理单个对话会话，并关闭可能残留的 TTS 引擎。"""
-
         session = self._session_store.remove(connection_id, dialog_id)
         if session is None:
             return
         await self._close_session(session)
 
     async def cleanup_connection(self, connection_id: str) -> None:
-        """连接断开时回收该连接下的全部 TTS 会话。"""
-
         sessions = self._session_store.pop_connection(connection_id)
         for session in sessions:
             await self._close_session(session)
+
+    async def _start_llm_dialog(
+        self,
+        context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
+        *,
+        dialog_id: str,
+        instruction_name: str,
+        prompt: str,
+        source: str,
+    ) -> None:
+        session = self._session_store.get_or_create(context.connection_id, dialog_id)
+        if session.server_owned or session.llm_task is not None:
+            return
+
+        session.server_owned = True
+        logger.info(
+            "dialog.server_owned",
+            extra={
+                "connectionId": context.connection_id,
+                "dialogId": dialog_id,
+                "instructionName": instruction_name,
+                "source": source,
+                "status": "ok",
+                "summary": f"server owned dialog source={source}",
+            },
+        )
+
+        await self.prime_dialog(
+            context,
+            interrupter,
+            dialog_id=dialog_id,
+            instruction_name=instruction_name,
+        )
+        await self._ensure_tts_session_started(context, dialog_id, session)
+
+        task = asyncio.create_task(
+            self._run_llm_stream(
+                context=context,
+                dialog_id=dialog_id,
+                instruction_name=instruction_name,
+                prompt=prompt,
+                source=source,
+            )
+        )
+        session.llm_task = task
+
+    async def _ensure_tts_session_started(
+        self,
+        context: ConnectionContext,
+        dialog_id: str,
+        session: DialogSessionState,
+    ) -> None:
+        if not session.tts_started:
+            engine = self._engine_factory()
+            await engine.start(self._session_key(context.connection_id, dialog_id), context.audio_sink)
+            session.engine = engine
+            session.tts_started = True
+
+        if not session.playback_started:
+            await context.playback_port.ensure_started()
+            session.playback_started = True
 
     async def _close_session(self, session: DialogSessionState) -> None:
         task = session.legacy_interrupt_task
@@ -157,6 +299,12 @@ class TtsReplacementCoordinator:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+        llm_task = session.llm_task
+        if llm_task is not None and not llm_task.done():
+            llm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await llm_task
 
         if session.engine is not None:
             await session.engine.close()
@@ -201,6 +349,110 @@ class TtsReplacementCoordinator:
         )
         return interrupted
 
+    async def _run_llm_stream(
+        self,
+        *,
+        context: ConnectionContext,
+        dialog_id: str,
+        instruction_name: str,
+        prompt: str,
+        source: str,
+    ) -> None:
+        current_task = asyncio.current_task()
+        logger.info(
+            "llm.stream.started",
+            extra={
+                "connectionId": context.connection_id,
+                "dialogId": dialog_id,
+                "instructionName": instruction_name,
+                "source": source,
+                "status": "started",
+                "summary": f"prompt={_truncate_text(prompt)}",
+            },
+        )
+
+        try:
+            assert self._llm_client is not None
+            async for delta in self._llm_client.stream_text(prompt):
+                if not delta or not delta.strip():
+                    continue
+
+                session = self._session_store.get(context.connection_id, dialog_id)
+                if session is None or session.engine is None:
+                    return
+
+                await session.engine.push_text(delta)
+                summary = f"text={_truncate_text(delta)}"
+                logger.info(
+                    "llm.stream.delta",
+                    extra={
+                        "connectionId": context.connection_id,
+                        "dialogId": dialog_id,
+                        "instructionName": instruction_name,
+                        "source": source,
+                        "status": "streaming",
+                        "summary": summary,
+                    },
+                )
+                logger.info(
+                    "tts.text.forwarded",
+                    extra={
+                        "connectionId": context.connection_id,
+                        "dialogId": dialog_id,
+                        "instructionName": instruction_name,
+                        "source": source,
+                        "summary": summary,
+                    },
+                )
+
+            await self.complete(context.connection_id, dialog_id)
+            logger.info(
+                "llm.stream.completed",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "completed",
+                    "summary": "llm stream completed",
+                },
+            )
+        except asyncio.CancelledError:
+            logger.info(
+                "llm.stream.cancelled",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "cancelled",
+                    "summary": "llm stream cancelled",
+                },
+            )
+            raise
+        except Exception:
+            logger.exception(
+                "llm.stream.failed",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "error",
+                    "summary": "llm stream failed",
+                },
+            )
+            with contextlib.suppress(Exception):
+                await self.complete(context.connection_id, dialog_id)
+        finally:
+            session = self._session_store.get(context.connection_id, dialog_id)
+            if session is not None and session.llm_task is current_task:
+                session.llm_task = None
+
     @staticmethod
     def _session_key(connection_id: str, dialog_id: str) -> str:
         return f"{connection_id}:{dialog_id}"
+
+
+def _truncate_text(value: str, limit: int = 160) -> str:
+    return value if len(value) <= limit else f"{value[:limit]}..."
