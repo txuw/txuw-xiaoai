@@ -43,7 +43,10 @@ class AgentStreamService:
         self._config = config
         self._client = self._build_client(config)
         self._model_provider = _OpenAiCompatibleModelProvider(self._client, config.model)
-        self._run_config = RunConfig(model_provider=self._model_provider)
+        self._run_config = RunConfig(
+            model_provider=self._model_provider,
+            tracing_disabled=True,
+        )
         # 当前链路仍然由 Query/ASR 文本事件触发，所以这里保持无状态 Agent，
         # 避免为单轮问答额外维护会话历史，先把输出接入点做得清晰可读。
         self._agent = Agent(

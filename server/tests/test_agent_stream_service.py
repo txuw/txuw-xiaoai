@@ -72,6 +72,7 @@ def test_agent_stream_service_only_yields_output_text_deltas(monkeypatch) -> Non
     assert chunks == ["hello", "world"]
     assert captured["prompt"] == "weather"
     assert captured["run_config"] is not None
+    assert captured["run_config"].tracing_disabled is True
 
 
 def test_agent_stream_service_skips_empty_and_whitespace_deltas(monkeypatch) -> None:

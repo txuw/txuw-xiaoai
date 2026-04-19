@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider
+
 from .agent import AgentStreamService
 from .handlers.dialog_lifecycle import DialogLifecycleHandler
 from .handlers.query import QueryHandler
@@ -24,6 +26,7 @@ class XiaoAiApplication:
         enabled: bool,
         agent_service: AgentStreamService | None = None,
         agent_enabled: bool = False,
+        memory_provider: MemoryProvider | None = None,
     ) -> None:
         session_store = DialogSessionStore()
         coordinator = TtsReplacementCoordinator(
@@ -32,13 +35,20 @@ class XiaoAiApplication:
             enabled=enabled,
             agent_service=agent_service,
             agent_enabled=agent_enabled,
+            memory_provider=memory_provider,
         )
         self._coordinator = coordinator
         self._interrupter_factory = interrupter_factory
+        self._memory_provider = memory_provider
         self._query_handlers: dict[str, QueryHandler] = {}
         self._speech_recognizer_handlers: dict[str, SpeechRecognizerHandler] = {}
         self._speech_synthesizer_handlers: dict[str, SpeechSynthesizerHandler] = {}
         self._dialog_lifecycle_handlers: dict[str, DialogLifecycleHandler] = {}
+
+    async def startup(self) -> None:
+        if self._memory_provider is None:
+            return
+        await self._memory_provider.startup()
 
     async def handle_inbound(self, message: Any, context: ConnectionContext) -> None:
         """应用层直接分发消息，避免额外中间层增加理解成本。"""
@@ -87,7 +97,11 @@ class XiaoAiApplication:
         )
 
     async def close(self) -> None:
-        await self._coordinator.close()
+        try:
+            await self._coordinator.close()
+        finally:
+            if self._memory_provider is not None:
+                await self._memory_provider.shutdown()
 
     def _query_handler(self, context: ConnectionContext) -> QueryHandler:
         handler = self._query_handlers.get(context.connection_id)

@@ -109,6 +109,84 @@ class BlockingAgentService:
         return None
 
 
+class FailingAgentService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error or RuntimeError("agent failed")
+        self.prompts: list[str] = []
+
+    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+        async def generator() -> AsyncIterator[str]:
+            self.prompts.append(prompt)
+            raise self.error
+            yield ""
+
+        return generator()
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeMemoryCommitWorker:
+    def __init__(self, *, raise_on_enqueue: Exception | None = None) -> None:
+        self.raise_on_enqueue = raise_on_enqueue
+        self.calls: list[dict[str, object]] = []
+
+    async def enqueue(
+        self,
+        user_id: str,
+        messages: list[dict[str, str]],
+        idempotency_key: str,
+    ) -> bool:
+        if self.raise_on_enqueue is not None:
+            raise self.raise_on_enqueue
+        self.calls.append(
+            {
+                "user_id": user_id,
+                "messages": messages,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return True
+
+
+class FakeMemoryProvider:
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        results: list[list[dict[str, object]]] | None = None,
+        search_error: Exception | None = None,
+        commit_worker: FakeMemoryCommitWorker | None = None,
+        user_id: str = "txuw",
+    ) -> None:
+        self._enabled = enabled
+        self._results = list(results or [])
+        self._search_error = search_error
+        self.commit_worker = commit_worker
+        self.user_id = user_id
+        self.search_calls: list[dict[str, object]] = []
+        self.startup_calls = 0
+        self.shutdown_calls = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    async def startup(self) -> None:
+        self.startup_calls += 1
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    async def search(self, query: str, *, user_id: str | None = None) -> list[dict[str, object]]:
+        self.search_calls.append({"query": query, "user_id": user_id})
+        if self._search_error is not None:
+            raise self._search_error
+        if not self._results:
+            return []
+        return self._results.pop(0)
+
+
 class FakeWebSocket:
     def __init__(self) -> None:
         self.text_messages: list[str] = []
@@ -126,8 +204,9 @@ def _create_application(
     engine: FakeEngine,
     interrupter: FakeInterrupter,
     enabled: bool = True,
-    agent_service: FakeAgentService | BlockingAgentService | None = None,
+    agent_service: FakeAgentService | BlockingAgentService | FailingAgentService | None = None,
     agent_enabled: bool = False,
+    memory_provider: FakeMemoryProvider | None = None,
 ) -> XiaoAiApplication:
     return XiaoAiApplication(
         engine_factory=lambda: engine,
@@ -135,6 +214,7 @@ def _create_application(
         enabled=enabled,
         agent_service=agent_service,
         agent_enabled=agent_enabled,
+        memory_provider=memory_provider,
     )
 
 
@@ -409,6 +489,70 @@ def test_query_starts_agent_stream_and_forwards_text_to_tts() -> None:
     assert engine.completed == 1
 
 
+def test_query_recall_injects_memories_into_agent_prompt() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = FakeAgentService([["answer"]])
+    memory_provider = FakeMemoryProvider(
+        results=[
+            [
+                {"memory": "主人最近在关注天气", "score": 0.92},
+            ]
+        ],
+        commit_worker=FakeMemoryCommitWorker(),
+    )
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-memory-query", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-memory-query"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert len(memory_provider.search_calls) == 1
+    assert memory_provider.search_calls[0] == {"query": "weather", "user_id": "txuw"}
+    assert "[相关记忆]" in agent_service.prompts[0]
+    assert "主人最近在关注天气" in agent_service.prompts[0]
+    assert "[当前用户问题]\nweather" in agent_service.prompts[0]
+
+
+def test_query_recall_failure_falls_back_to_original_prompt() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = FakeAgentService([["answer"]])
+    memory_provider = FakeMemoryProvider(
+        search_error=RuntimeError("memory unavailable"),
+        commit_worker=FakeMemoryCommitWorker(),
+    )
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-memory-fallback", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-memory-fallback"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert agent_service.prompts == ["weather"]
+
+
 def test_agent_completed_log_contains_aggregated_text(caplog) -> None:
     transport = FakeTransport()
     engine = FakeEngine()
@@ -466,6 +610,46 @@ def test_final_asr_can_start_agent_stream_without_query() -> None:
     assert transport.ensure_started_calls == 1
     assert engine.pushed_texts == ["fallback answer"]
     assert engine.completed == 1
+
+
+def test_final_asr_uses_same_memory_recall_path() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = FakeAgentService([["fallback answer"]])
+    memory_provider = FakeMemoryProvider(
+        results=[
+            [
+                {"memory": "主人喜欢简短回答", "score": 0.88},
+            ]
+        ],
+        commit_worker=FakeMemoryCommitWorker(),
+    )
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-memory-asr", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(
+            _recognize_result_message("recognized text", is_final=True, dialog_id="dialog-memory-asr"),
+            context,
+        )
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert len(memory_provider.search_calls) == 1
+    assert memory_provider.search_calls[0] == {
+        "query": "recognized text",
+        "user_id": "txuw",
+    }
+    assert "主人喜欢简短回答" in agent_service.prompts[0]
 
 
 def test_application_speak_text_can_append_while_agent_stream_is_running() -> None:
@@ -615,6 +799,114 @@ def test_disconnect_cancels_agent_task_and_closes_engine() -> None:
     assert engine.started is True
     assert engine.closed == 1
     assert agent_service.cancelled.is_set()
+
+
+def test_successful_agent_stream_enqueues_memory_commit() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    commit_worker = FakeMemoryCommitWorker()
+    memory_provider = FakeMemoryProvider(commit_worker=commit_worker)
+    agent_service = FakeAgentService([["answer ", "from agent"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-commit", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-commit"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert commit_worker.calls == [
+        {
+            "user_id": "txuw",
+            "messages": [
+                {"role": "user", "content": "weather"},
+                {"role": "assistant", "content": "answer from agent"},
+            ],
+            "idempotency_key": "conn-commit:dialog-commit:query",
+        }
+    ]
+
+
+def test_empty_agent_output_does_not_enqueue_memory_commit() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    commit_worker = FakeMemoryCommitWorker()
+    memory_provider = FakeMemoryProvider(commit_worker=commit_worker)
+    agent_service = FakeAgentService([["", "   ", "\n"]])
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-empty-commit", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-empty-commit"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert commit_worker.calls == []
+
+
+def test_failed_agent_stream_does_not_enqueue_memory_commit() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    commit_worker = FakeMemoryCommitWorker()
+    memory_provider = FakeMemoryProvider(commit_worker=commit_worker)
+    agent_service = FailingAgentService()
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-failed-commit", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-failed-commit"), context)
+        await _drain_loop()
+
+    asyncio.run(scenario())
+
+    assert commit_worker.calls == []
+
+
+def test_application_startup_and_close_manage_memory_provider() -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    memory_provider = FakeMemoryProvider(commit_worker=FakeMemoryCommitWorker())
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        memory_provider=memory_provider,
+    )
+
+    async def scenario() -> None:
+        await application.startup()
+        await application.close()
+
+    asyncio.run(scenario())
+
+    assert memory_provider.startup_calls == 1
+    assert memory_provider.shutdown_calls == 1
 
 
 def test_transport_ensure_started_sends_start_play_request() -> None:

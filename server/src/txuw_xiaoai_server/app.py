@@ -18,6 +18,7 @@ from .socket_logging import (
     build_socket_log_entry,
 )
 from .transport import ClientSessionTransport
+from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider, MemoryProviderConfig
 from .xiaoai_handlers import ConnectionContext, DashScopeStreamingTtsConfig, XiaoAiApplication
 from .xiaoai_handlers.agent import AgentStreamConfig, AgentStreamService
 from .xiaoai_handlers.services.dashscope_streaming_tts import DashScopeStreamingTtsEngine
@@ -35,6 +36,7 @@ def create_app(application: XiaoAiApplication | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            await app_application.startup()
             yield
         finally:
             with contextlib.suppress(Exception):
@@ -260,6 +262,26 @@ def _build_application() -> XiaoAiApplication:
             )
         )
 
+    memory_provider = MemoryProvider(
+        MemoryProviderConfig(
+            enabled=settings.memory_enabled,
+            user_id=settings.memory_user_id,
+            llm_model=settings.memory_llm_model,
+            embedding_model=settings.memory_embedding_model,
+            milvus_url=settings.memory_milvus_url,
+            milvus_token=settings.memory_milvus_token,
+            milvus_db_name=settings.memory_milvus_db_name,
+            milvus_collection_name=settings.memory_milvus_collection_name,
+            recall_max_results=settings.memory_recall_max_results,
+            recall_min_score=settings.memory_recall_min_score,
+            commit_queue_maxsize=settings.memory_commit_queue_maxsize,
+            commit_worker_count=settings.memory_commit_worker_count,
+            timeout_seconds=settings.llm_timeout_seconds,
+        ),
+        llm_api_key=settings.llm_api_key,
+        llm_base_url=settings.llm_base_url,
+    )
+
     return XiaoAiApplication(
         engine_factory=lambda: DashScopeStreamingTtsEngine(tts_config),
         interrupter_factory=lambda context: AbortLegacyXiaoaiInterrupter(
@@ -270,4 +292,5 @@ def _build_application() -> XiaoAiApplication:
         enabled=legacy_enabled,
         agent_service=agent_service,
         agent_enabled=agent_enabled,
+        memory_provider=memory_provider,
     )

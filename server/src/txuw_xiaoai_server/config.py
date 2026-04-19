@@ -25,6 +25,18 @@ class Settings(BaseSettings):
         "请用自然、简短、口语化的中文回答。"
         "只输出纯文本，不要使用 Markdown、列表编号、代码块或表情。"
     )
+    memory_enabled: bool = False
+    memory_user_id: str = "txuw"
+    memory_llm_model: str = "gpt-5-nano-2025-08-07"
+    memory_embedding_model: str = "text-embedding-3-small"
+    memory_milvus_url: str = ""
+    memory_milvus_token: str = ""
+    memory_milvus_db_name: str = "default"
+    memory_milvus_collection_name: str = "txuw_xiaoai_mem0"
+    memory_recall_max_results: int = 5
+    memory_recall_min_score: float = 0.3
+    memory_commit_queue_maxsize: int = 256
+    memory_commit_worker_count: int = 2
     tts_sample_rate: int = 22050
     tts_channels: int = 1
     tts_bits_per_sample: int = 16

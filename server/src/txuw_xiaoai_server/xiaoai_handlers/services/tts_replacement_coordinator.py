@@ -5,6 +5,8 @@ import contextlib
 import logging
 from collections.abc import Callable
 
+from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider
+
 from ..agent import AgentStreamService
 from ..ports import ConnectionContext, LegacyAudioInterrupter, StreamingTtsEngine
 from ..sessions import DialogSessionState, DialogSessionStore
@@ -24,12 +26,14 @@ class TtsReplacementCoordinator:
         enabled: bool,
         agent_service: AgentStreamService | None = None,
         agent_enabled: bool = False,
+        memory_provider: MemoryProvider | None = None,
     ) -> None:
         self._session_store = session_store
         self._engine_factory = engine_factory
         self._enabled = enabled
         self._agent_service = agent_service
         self._agent_enabled = agent_enabled and agent_service is not None
+        self._memory_provider = memory_provider
 
     async def close(self) -> None:
         if self._agent_service is None:
@@ -430,7 +434,14 @@ class TtsReplacementCoordinator:
 
         try:
             assert self._agent_service is not None
-            async for delta in self._agent_service.stream_text(prompt):
+            agent_prompt = await self._build_agent_prompt(
+                context=context,
+                dialog_id=dialog_id,
+                instruction_name=instruction_name,
+                prompt=prompt,
+                source=source,
+            )
+            async for delta in self._agent_service.stream_text(agent_prompt):
                 if not delta or not delta.strip():
                     continue
 
@@ -463,6 +474,15 @@ class TtsReplacementCoordinator:
                 )
             await self.complete(context.connection_id, dialog_id)
             session = self._session_store.get(context.connection_id, dialog_id)
+            if session is not None:
+                await self._enqueue_memory_commit(
+                    context=context,
+                    dialog_id=dialog_id,
+                    instruction_name=instruction_name,
+                    prompt=prompt,
+                    source=source,
+                    full_text=session.agent_full_text,
+                )
             logger.info(
                 "agent.stream.completed",
                 extra={
@@ -510,6 +530,121 @@ class TtsReplacementCoordinator:
             session = self._session_store.get(context.connection_id, dialog_id)
             if session is not None and session.agent_task is current_task:
                 session.agent_task = None
+
+    async def _build_agent_prompt(
+        self,
+        *,
+        context: ConnectionContext,
+        dialog_id: str,
+        instruction_name: str,
+        prompt: str,
+        source: str,
+    ) -> str:
+        memory_provider = self._memory_provider
+        if memory_provider is None or not memory_provider.enabled:
+            return prompt
+
+        try:
+            memories = await memory_provider.search(
+                prompt,
+                user_id=memory_provider.user_id,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "memory.recall.timeout",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "timeout",
+                    "summary": "memory recall timed out",
+                },
+            )
+            return prompt
+        except Exception:
+            logger.exception(
+                "memory.recall.failed",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "error",
+                    "summary": "memory recall failed",
+                },
+            )
+            return prompt
+
+        lines: list[str] = []
+        for item in memories:
+            memory_text = item.get("memory")
+            if isinstance(memory_text, str) and memory_text.strip():
+                lines.append(f"- {memory_text.strip()}")
+
+        if not lines:
+            return prompt
+
+        logger.info(
+            "memory.recall.completed",
+            extra={
+                "connectionId": context.connection_id,
+                "dialogId": dialog_id,
+                "instructionName": instruction_name,
+                "source": source,
+                "hitCount": len(lines),
+                "status": "completed",
+                "summary": "memory recall completed",
+            },
+        )
+        return (
+            "以下是与当前用户有关的长期记忆，仅在确实相关时参考，不要生硬复述或逐条引用。\n"
+            "[相关记忆]\n"
+            f"{'\n'.join(lines)}\n\n"
+            f"[当前用户问题]\n{prompt}"
+        )
+
+    async def _enqueue_memory_commit(
+        self,
+        *,
+        context: ConnectionContext,
+        dialog_id: str,
+        instruction_name: str,
+        prompt: str,
+        source: str,
+        full_text: str,
+    ) -> None:
+        memory_provider = self._memory_provider
+        if memory_provider is None or not memory_provider.enabled:
+            return
+
+        commit_worker = memory_provider.commit_worker
+        if commit_worker is None:
+            return
+        if not prompt.strip() or not full_text.strip():
+            return
+
+        try:
+            await commit_worker.enqueue(
+                memory_provider.user_id,
+                [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": full_text},
+                ],
+                f"{context.connection_id}:{dialog_id}:{source}",
+            )
+        except Exception:
+            logger.exception(
+                "memory.commit.enqueue_failed",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "error",
+                    "summary": "memory commit enqueue failed",
+                },
+            )
 
     def _mark_server_owned(
         self,
