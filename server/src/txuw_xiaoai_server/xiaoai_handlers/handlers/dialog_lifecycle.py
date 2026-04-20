@@ -25,6 +25,8 @@ class DialogLifecycleHandler:
         header = envelope.header
 
         if header.name == "StartStream":
+            if not self._coordinator.is_takeover_dialog(context.connection_id, header.dialog_id):
+                return False
             await self._coordinator.prime_dialog(
                 context,
                 self._interrupter,
@@ -36,5 +38,8 @@ class DialogLifecycleHandler:
         if header.name == "Finish":
             await self._coordinator.cleanup_dialog(context.connection_id, header.dialog_id)
             return True
+
+        if not self._coordinator.is_takeover_dialog(context.connection_id, header.dialog_id):
+            return False
 
         return header.name in {"StartAnswer", "FinishAnswer", "FinishStream"}

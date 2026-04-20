@@ -25,6 +25,8 @@ class QueryHandler:
         header = envelope.header
         if header.name != "Query" or header.namespace != "Template":
             return False
+        if not self._coordinator.is_takeover_dialog(context.connection_id, header.dialog_id):
+            return False
 
         text = ""
         if isinstance(envelope.raw_payload, dict):

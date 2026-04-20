@@ -25,6 +25,8 @@ class SpeechSynthesizerHandler:
         header = envelope.header
         if header.namespace != "SpeechSynthesizer":
             return False
+        if not self._coordinator.is_takeover_dialog(context.connection_id, header.dialog_id):
+            return False
 
         if self._coordinator.is_server_owned(context.connection_id, header.dialog_id):
             # 同一个 dialog 一旦改由服务端 Agent 接管，就必须屏蔽旧链路的 SpeakStream，

@@ -19,6 +19,9 @@ class DialogSessionState:
     sealed: bool = False
     query_text: str = ""
     final_asr_text: str = ""
+    wake_keyword: str = ""
+    takeover_enabled: bool = False
+    wake_rule_bound: bool = False
     server_owned: bool = False
     agent_task: asyncio.Task[None] | None = None
     agent_full_text: str = ""

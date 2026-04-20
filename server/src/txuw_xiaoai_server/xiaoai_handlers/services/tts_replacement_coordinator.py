@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from time import perf_counter
 
+from txuw_xiaoai_server.config import settings
 from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider
 
 from ..agent import AgentRunContext, AgentStreamService
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class TtsReplacementCoordinator:
-    """协调旧小爱打断、Agent 输出与新 TTS 播放。"""
+    """协调旧小爱打断、Agent 输出与 KWS 欢迎音频播放。"""
 
     def __init__(
         self,
@@ -28,6 +29,7 @@ class TtsReplacementCoordinator:
         agent_service: AgentStreamService | None = None,
         agent_enabled: bool = False,
         memory_provider: MemoryProvider | None = None,
+        kws_takeover_enabled: bool = False,
     ) -> None:
         self._session_store = session_store
         self._engine_factory = engine_factory
@@ -35,6 +37,12 @@ class TtsReplacementCoordinator:
         self._agent_service = agent_service
         self._agent_enabled = agent_enabled and agent_service is not None
         self._memory_provider = memory_provider
+        self._kws_takeover_enabled = kws_takeover_enabled
+        bytes_per_sample = max(settings.tts_bits_per_sample // 8, 1)
+        self._audio_chunk_size = max(
+            settings.tts_buffer_size * max(settings.tts_channels, 1) * bytes_per_sample,
+            1024,
+        )
 
     async def close(self) -> None:
         if self._agent_service is None:
@@ -44,6 +52,30 @@ class TtsReplacementCoordinator:
     def is_server_owned(self, connection_id: str, dialog_id: str) -> bool:
         session = self._session_store.get(connection_id, dialog_id)
         return bool(session and session.server_owned)
+
+    def is_takeover_dialog(self, connection_id: str, dialog_id: str) -> bool:
+        if not self._kws_takeover_enabled:
+            return True
+
+        session = self._session_store.get(connection_id, dialog_id)
+        return bool(session and session.takeover_enabled)
+
+    def bind_wake_policy(
+        self,
+        connection_id: str,
+        dialog_id: str,
+        *,
+        keyword: str,
+        takeover: bool,
+    ) -> bool:
+        session = self._session_store.get_or_create(connection_id, dialog_id)
+        if session.wake_rule_bound:
+            return False
+
+        session.wake_keyword = keyword
+        session.takeover_enabled = takeover
+        session.wake_rule_bound = True
+        return True
 
     async def on_query(
         self,
@@ -57,6 +89,8 @@ class TtsReplacementCoordinator:
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
         session.query_text = text
 
+        if not self._should_use_server_dialog(session):
+            return
         if not text:
             return
         if not self._agent_enabled:
@@ -98,6 +132,8 @@ class TtsReplacementCoordinator:
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
         session.final_asr_text = text
 
+        if not self._should_use_server_dialog(session):
+            return
         if not self._agent_enabled:
             logger.info(
                 "agent.stream.skipped",
@@ -130,6 +166,10 @@ class TtsReplacementCoordinator:
         instruction_name: str,
         text: str,
     ) -> None:
+        session = self._session_store.get_or_create(context.connection_id, dialog_id)
+        if not self._should_use_server_dialog(session):
+            return
+
         if not self._enabled:
             if text:
                 logger.info(
@@ -154,7 +194,6 @@ class TtsReplacementCoordinator:
         if not text:
             return
 
-        session = self._session_store.get_or_create(context.connection_id, dialog_id)
         await self._push_session_text(
             context=context,
             dialog_id=dialog_id,
@@ -177,7 +216,7 @@ class TtsReplacementCoordinator:
         if not text or not text.strip():
             return
 
-        if not (self._enabled or self._agent_enabled):
+        if not self._server_audio_available():
             logger.info(
                 "tts.text.skipped",
                 extra={
@@ -228,6 +267,69 @@ class TtsReplacementCoordinator:
         # v1 的主动播报主要用于在同一 dialog 中插入 Tool 前置提示，
         # 播报后通常还会继续有 Agent 文本进入，所以这里不自动 complete 当前 TTS 会话。
 
+    async def play_audio_bytes(
+        self,
+        context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
+        *,
+        dialog_id: str,
+        instruction_name: str,
+        source: str,
+        pcm_bytes: bytes,
+        interrupt_legacy: bool = True,
+    ) -> None:
+        """直接向现有播放模块推送 PCM，不引入新的音频抽象层。"""
+
+        if not pcm_bytes:
+            return
+
+        if not self._server_audio_available():
+            logger.info(
+                "tts.audio.skipped",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "disabled",
+                    "summary": "server audio output disabled",
+                },
+            )
+            return
+
+        session = self._session_store.get_or_create(context.connection_id, dialog_id)
+        if session.sealed:
+            logger.info(
+                "tts.audio.skipped",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "status": "sealed",
+                    "summary": "dialog already sealed",
+                },
+            )
+            return
+
+        # KWS 欢迎音频是在 native wake 之后播放的，这里不能再触发 legacy interrupt，
+        # 否则默认的 restart 命令会把刚起来的收音链路一起打断。
+        if interrupt_legacy:
+            await self.prime_dialog(
+                context,
+                interrupter,
+                dialog_id=dialog_id,
+                instruction_name=instruction_name,
+            )
+        await self._push_audio_bytes(
+            context=context,
+            dialog_id=dialog_id,
+            session=session,
+            instruction_name=instruction_name,
+            source=source,
+            pcm_bytes=pcm_bytes,
+        )
+
     async def prime_dialog(
         self,
         context: ConnectionContext,
@@ -236,7 +338,7 @@ class TtsReplacementCoordinator:
         dialog_id: str,
         instruction_name: str,
     ) -> None:
-        if not (self._enabled or self._agent_enabled):
+        if not self._server_audio_available():
             return
 
         session = self._session_store.get_or_create(context.connection_id, dialog_id)
@@ -344,7 +446,10 @@ class TtsReplacementCoordinator:
     ) -> None:
         if not session.tts_started:
             engine = self._engine_factory()
-            await engine.start(self._session_key(context.connection_id, dialog_id), context.audio_sink)
+            await engine.start(
+                self._session_key(context.connection_id, dialog_id),
+                context.audio_sink,
+            )
             session.engine = engine
             session.tts_started = True
 
@@ -361,7 +466,7 @@ class TtsReplacementCoordinator:
 
         agent_task = session.agent_task
         if agent_task is not None and not agent_task.done():
-            # 先取消 Agent 任务，再关闭 TTS，会更容易保证不会有晚到的文本继续写入已关闭的音频会话。
+            # 先取消 Agent 任务，再关闭 TTS，会更容易保证不会有晚到文本写入已关闭的会话。
             agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await agent_task
@@ -470,7 +575,7 @@ class TtsReplacementCoordinator:
                 )
                 if not forwarded:
                     return
-                summary = f"text={_truncate_text(delta)}"
+
                 logger.info(
                     "agent.stream.delta",
                     extra={
@@ -479,9 +584,10 @@ class TtsReplacementCoordinator:
                         "instructionName": instruction_name,
                         "source": source,
                         "status": "streaming",
-                        "summary": summary,
+                        "summary": f"text={_truncate_text(delta)}",
                     },
                 )
+
             await self.complete(context.connection_id, dialog_id)
             session = self._session_store.get(context.connection_id, dialog_id)
             if session is not None:
@@ -560,8 +666,7 @@ class TtsReplacementCoordinator:
                 return
 
             announce_key = _progress_announce_key(normalized)
-            # Tool 进度播报是体验提示，而不是正文内容；同一 dialog 里同一阶段只播一次，
-            # 可以避免模型多次尝试调用同一个工具时把“正在获取地区”反复读给用户听。
+            # Tool 进度播报是体验提示，不是正文内容；同一阶段只播一次，避免重复打扰。
             if announce_key in announce_once_keys:
                 return
             announce_once_keys.add(announce_key)
@@ -638,9 +743,8 @@ class TtsReplacementCoordinator:
             )
             return prompt
 
-        memories = search_result.results
         lines: list[str] = []
-        for item in memories:
+        for item in search_result.results:
             memory_text = item.get("memory")
             if isinstance(memory_text, str) and memory_text.strip():
                 lines.append(f"- {memory_text.strip()}")
@@ -662,10 +766,12 @@ class TtsReplacementCoordinator:
         )
         if not lines:
             return prompt
+
+        memory_block = "\n".join(lines)
         return (
             "以下是与当前用户有关的长期记忆，仅在确实相关时参考，不要生硬复述或逐条引用。\n"
             "[相关记忆]\n"
-            f"{'\n'.join(lines)}\n\n"
+            f"{memory_block}\n\n"
             f"[当前用户问题]\n{prompt}"
         )
 
@@ -736,6 +842,60 @@ class TtsReplacementCoordinator:
             },
         )
 
+    def _server_audio_available(self) -> bool:
+        return self._enabled or self._agent_enabled or self._kws_takeover_enabled
+
+    def _should_use_server_dialog(self, session: DialogSessionState) -> bool:
+        if not self._kws_takeover_enabled:
+            return True
+        return session.takeover_enabled
+
+    async def _push_audio_bytes(
+        self,
+        *,
+        context: ConnectionContext,
+        dialog_id: str,
+        session: DialogSessionState,
+        instruction_name: str,
+        source: str,
+        pcm_bytes: bytes,
+    ) -> bool:
+        async with session.tts_write_lock:
+            if session.sealed:
+                logger.info(
+                    "tts.audio.skipped",
+                    extra={
+                        "connectionId": context.connection_id,
+                        "dialogId": dialog_id,
+                        "instructionName": instruction_name,
+                        "source": source,
+                        "status": "sealed",
+                        "summary": "dialog already sealed",
+                    },
+                )
+                return False
+
+            if not session.playback_started:
+                await context.playback_port.ensure_started()
+                session.playback_started = True
+
+            # 欢迎音频不走 TTS 引擎，直接复用现有播放链路分块推送 PCM。
+            for chunk in _iter_audio_chunks(pcm_bytes, self._audio_chunk_size):
+                await context.audio_sink.write(chunk)
+
+            logger.info(
+                "tts.audio.forwarded",
+                extra={
+                    "connectionId": context.connection_id,
+                    "dialogId": dialog_id,
+                    "instructionName": instruction_name,
+                    "source": source,
+                    "byteLength": len(pcm_bytes),
+                    "summary": "pcm audio forwarded",
+                },
+            )
+            return True
+
     async def _push_session_text(
         self,
         *,
@@ -765,13 +925,11 @@ class TtsReplacementCoordinator:
             await self._ensure_tts_session_started(context, dialog_id, session)
             assert session.engine is not None
 
-            # 同一 dialog 的文本可能来自 Agent、旧链路转发和 Tool 前置提示，
-            # 必须统一串行化 push_text，才能避免底层流式 TTS 会话乱序写入。
+            # 同一 dialog 的文本可能来自 Agent、旧链路转发和 Tool 提示，必须串行写入。
             await session.engine.push_text(text)
 
             if mark_server_owned_after_push:
-                # 服务端一旦成功把文本写进当前 dialog，后续就必须屏蔽设备侧旧播报，
-                # 否则旧链路 SpeakStream 和服务端主动提示会同时落到同一音频输出。
+                # 服务端一旦主动写入当前 dialog，后续旧链路播报就必须被屏蔽，避免串音。
                 self._mark_server_owned(
                     context=context,
                     dialog_id=dialog_id,
@@ -809,6 +967,11 @@ def _get_agent_full_text(session: DialogSessionState | None) -> str:
     if session is None:
         return ""
     return session.agent_full_text
+
+
+def _iter_audio_chunks(pcm_bytes: bytes, chunk_size: int) -> Iterator[bytes]:
+    for start in range(0, len(pcm_bytes), chunk_size):
+        yield pcm_bytes[start : start + chunk_size]
 
 
 def _progress_announce_key(text: str) -> str:

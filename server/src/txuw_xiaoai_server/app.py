@@ -250,6 +250,19 @@ def _build_application() -> XiaoAiApplication:
             ),
         },
     )
+    logger.info(
+        "kws.takeover.bootstrap",
+        extra={
+            "kwsTakeoverEnabled": settings.kws_takeover_enabled,
+            "kwsRuleCount": len(settings.kws_takeover_rules),
+            "status": "enabled" if settings.kws_takeover_enabled else "disabled",
+            "summary": (
+                "kws takeover enabled"
+                if settings.kws_takeover_enabled
+                else "kws takeover disabled"
+            ),
+        },
+    )
 
     tts_config = DashScopeStreamingTtsConfig(
         api_key=settings.dashscope_api_key,
@@ -313,4 +326,10 @@ def _build_application() -> XiaoAiApplication:
         agent_service=agent_service,
         agent_enabled=agent_enabled,
         memory_provider=memory_provider,
+        kws_takeover_enabled=settings.kws_takeover_enabled,
+        kws_takeover_rules=settings.kws_takeover_rules,
+        kws_native_wake_command=settings.kws_native_wake_command,
+        kws_pending_timeout_seconds=settings.kws_pending_timeout_seconds,
+        kws_welcome_idle_timeout_seconds=settings.kws_welcome_idle_timeout_seconds,
+        kws_audio_cache_dir=settings.kws_audio_cache_dir,
     )

@@ -99,12 +99,14 @@ class EmptyPayload(BaseModel):
 
 class RecognizeResultPayload(BaseModel):
     is_final: bool
-    is_vad_begin: bool
+    # Some devices omit this field on incremental/final ASR frames.
+    is_vad_begin: bool | None = None
     results: list[RecognizeResultItem] = Field(default_factory=list)
 
 
 class StopCapturePayload(BaseModel):
-    stop_time: int
+    # Some firmware only sends an empty payload when capture stops.
+    stop_time: int | None = None
 
 
 class SpeakPayload(BaseModel):

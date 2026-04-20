@@ -25,11 +25,11 @@
     "summaries": [
       "instruction new file",
       "text=- is_final=False results=1",
-      "StopCapture degraded",
-      "RecognizeResult degraded",
+      "stop_time=None",
+      "text=- is_final=True results=1",
       "Finish"
     ],
-    "degraded_count": 2,
+    "degraded_count": 0,
     "terminal_playing_state": null
   }
 }

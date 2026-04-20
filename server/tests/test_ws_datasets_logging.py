@@ -22,11 +22,11 @@ def test_tv_control_dataset_contains_instruction_control() -> None:
     assert replay.terminal_playing_state == "Idle"
 
 
-def test_wake_only_dataset_allows_degraded_messages() -> None:
+def test_wake_only_dataset_supports_missing_optional_fields() -> None:
     dataset = next(item for item in load_all_datasets() if item.name == "wake_only")
     replay = replay_dataset_via_parser(dataset)
 
-    assert replay.degraded_count == 2
-    assert "StopCapture degraded" in replay.summaries
-    assert "RecognizeResult degraded" in replay.summaries
+    assert replay.degraded_count == 0
+    assert "stop_time=None" in replay.summaries
+    assert "text=- is_final=True results=1" in replay.summaries
     assert replay.terminal_playing_state is None

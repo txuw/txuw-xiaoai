@@ -25,6 +25,8 @@ class SpeechRecognizerHandler:
         header = envelope.header
         if header.namespace != "SpeechRecognizer" or header.name != "RecognizeResult":
             return False
+        if not self._coordinator.is_takeover_dialog(context.connection_id, header.dialog_id):
+            return False
 
         payload = envelope.payload_model
         results = getattr(payload, "results", [])
@@ -41,12 +43,22 @@ class SpeechRecognizerHandler:
 
 
 def _extract_recognized_text(results: list[Any]) -> str:
+    """兼容协议对象和 degraded 字典结果，提取最后一条可用文本。"""
+
     for item in reversed(results):
-        text = getattr(item, "text", "")
+        text = _result_field(item, "text")
         if isinstance(text, str) and text.strip():
             return text
 
-        origin_text = getattr(item, "origin_text", "")
+        origin_text = _result_field(item, "origin_text")
         if isinstance(origin_text, str) and origin_text.strip():
             return origin_text
     return ""
+
+
+def _result_field(item: Any, field_name: str) -> Any:
+    """设备上报缺字段时会退化为 dict，这里统一兜底读取。"""
+
+    if isinstance(item, dict):
+        return item.get(field_name, "")
+    return getattr(item, field_name, "")

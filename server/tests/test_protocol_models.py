@@ -56,7 +56,7 @@ def test_parse_instruction_event_decodes_payload() -> None:
     assert message.payload_error is None
 
 
-def test_known_instruction_payload_keeps_type_and_error_on_validation_failure() -> None:
+def test_recognize_result_allows_missing_is_vad_begin() -> None:
     instruction = {
         "header": {
             "dialog_id": "dialog-1",
@@ -65,6 +65,7 @@ def test_known_instruction_payload_keeps_type_and_error_on_validation_failure() 
             "namespace": "SpeechRecognizer",
         },
         "payload": {
+            "is_final": True,
             "results": [{"confidence": 0.8, "text": "hello"}],
         },
     }
@@ -82,13 +83,44 @@ def test_known_instruction_payload_keeps_type_and_error_on_validation_failure() 
     assert isinstance(message, InstructionEventMessage)
     assert message.data.decoded_envelope is not None
     assert message.data.decoded_envelope.payload_kind == "RecognizeResultPayload"
-    assert message.data.decoded_envelope.payload_error is not None
-    assert message.payload_error is not None
+    assert message.data.decoded_envelope.payload_error is None
+    assert message.payload_error is None
+    assert message.data.decoded_envelope.payload_model.is_vad_begin is None
+
+
+def test_stop_capture_allows_missing_stop_time() -> None:
+    instruction = {
+        "header": {
+            "dialog_id": "dialog-1",
+            "id": "msg-2",
+            "name": "StopCapture",
+            "namespace": "SpeechRecognizer",
+        },
+        "payload": {},
+    }
+    message = parse_text_message(
+        json.dumps(
+            {
+                "Event": {
+                    "id": "5",
+                    "event": "instruction",
+                    "data": {"NewLine": json.dumps(instruction)},
+                }
+            }
+        )
+    )
+
+    assert isinstance(message, InstructionEventMessage)
+    assert message.data.decoded_envelope is not None
+    assert message.data.decoded_envelope.payload_kind == "StopCapturePayload"
+    assert message.data.decoded_envelope.payload_error is None
+    assert message.payload_error is None
+    assert message.data.decoded_envelope.payload_model.stop_time is None
 
 
 def test_unknown_event_returns_unknown_message() -> None:
     message = parse_text_message(
-        json.dumps({"Event": {"id": "5", "event": "custom", "data": {"x": 1}}})
+        json.dumps({"Event": {"id": "6", "event": "custom", "data": {"x": 1}}})
     )
     assert isinstance(message, UnknownEventMessage)
     assert message.event == "custom"
