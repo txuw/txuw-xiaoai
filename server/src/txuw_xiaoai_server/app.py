@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import httpx
 from starlette import status
 
 from .config import settings
@@ -20,7 +21,13 @@ from .socket_logging import (
 from .transport import ClientSessionTransport
 from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider, MemoryProviderConfig
 from .xiaoai_handlers import ConnectionContext, DashScopeStreamingTtsConfig, XiaoAiApplication
-from .xiaoai_handlers.agent import AgentStreamConfig, AgentStreamService
+from .xiaoai_handlers.agent import (
+    AmapIpRegionProvider,
+    AgentStreamConfig,
+    AgentStreamService,
+    AgentToolsetFactory,
+    RegionLookupService,
+)
 from .xiaoai_handlers.services.dashscope_streaming_tts import DashScopeStreamingTtsEngine
 from .xiaoai_handlers.services.legacy_audio_interrupt import AbortLegacyXiaoaiInterrupter
 
@@ -252,6 +259,13 @@ def _build_application() -> XiaoAiApplication:
 
     agent_service = None
     if agent_enabled:
+        region_service = RegionLookupService(
+            AmapIpRegionProvider(
+                httpx.AsyncClient(),
+                key=settings.amap_web_service_key,
+            ),
+            cache_ttl_seconds=settings.region_tool_cache_ttl_seconds,
+        )
         agent_service = AgentStreamService(
             AgentStreamConfig(
                 api_key=settings.llm_api_key,
@@ -259,7 +273,13 @@ def _build_application() -> XiaoAiApplication:
                 model=settings.llm_model,
                 timeout_seconds=settings.llm_timeout_seconds,
                 system_prompt=settings.llm_system_prompt,
-            )
+            ),
+            region_service=region_service,
+            toolset_factory=AgentToolsetFactory(
+                amap_web_service_key=settings.amap_web_service_key,
+                region_tool_enabled=settings.region_tool_enabled,
+                region_tool_timeout_seconds=settings.region_tool_timeout_seconds,
+            ),
         )
 
     memory_provider = MemoryProvider(

@@ -72,11 +72,13 @@ class FakeAgentService:
     def __init__(self, responses: list[list[str]] | None = None) -> None:
         self._responses = list(responses or [])
         self.prompts: list[str] = []
+        self.run_contexts: list[object] = []
         self.close_calls = 0
 
-    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+    def stream_text(self, prompt: str, run_context) -> AsyncIterator[str]:
         async def generator() -> AsyncIterator[str]:
             self.prompts.append(prompt)
+            self.run_contexts.append(run_context)
             deltas = self._responses.pop(0) if self._responses else []
             for delta in deltas:
                 await asyncio.sleep(0)
@@ -87,17 +89,23 @@ class FakeAgentService:
     async def close(self) -> None:
         self.close_calls += 1
 
+    @property
+    def region_service(self):
+        return object()
+
 
 class BlockingAgentService:
     def __init__(self, first_delta: str = "streaming") -> None:
         self.first_delta = first_delta
         self.prompts: list[str] = []
+        self.run_contexts: list[object] = []
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
 
-    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+    def stream_text(self, prompt: str, run_context) -> AsyncIterator[str]:
         async def generator() -> AsyncIterator[str]:
             self.prompts.append(prompt)
+            self.run_contexts.append(run_context)
             self.started.set()
             yield self.first_delta
             try:
@@ -112,15 +120,21 @@ class BlockingAgentService:
     async def close(self) -> None:
         return None
 
+    @property
+    def region_service(self):
+        return object()
+
 
 class FailingAgentService:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error or RuntimeError("agent failed")
         self.prompts: list[str] = []
+        self.run_contexts: list[object] = []
 
-    def stream_text(self, prompt: str) -> AsyncIterator[str]:
+    def stream_text(self, prompt: str, run_context) -> AsyncIterator[str]:
         async def generator() -> AsyncIterator[str]:
             self.prompts.append(prompt)
+            self.run_contexts.append(run_context)
             raise self.error
             yield ""
 
@@ -128,6 +142,10 @@ class FailingAgentService:
 
     async def close(self) -> None:
         return None
+
+    @property
+    def region_service(self):
+        return object()
 
 
 class FakeMemoryCommitWorker:
@@ -505,6 +523,7 @@ def test_query_starts_agent_stream_and_forwards_text_to_tts() -> None:
     asyncio.run(scenario())
 
     assert agent_service.prompts == ["weather"]
+    assert agent_service.run_contexts[0].dialog_id == "dialog-query"
     assert interrupter.calls == [("conn-query", "dialog-query")]
     assert transport.ensure_started_calls == 1
     assert engine.started is True
@@ -742,13 +761,7 @@ def test_application_speak_text_can_append_while_agent_stream_is_running() -> No
         await application.handle_inbound(_query_message("weather", "dialog-tool"), context)
         await agent_service.started.wait()
         await _drain_loop(2)
-        await application.speak_text(
-            context,
-            dialog_id="dialog-tool",
-            text="正在查询天气",
-            instruction_name="ToolCallStatus",
-            source="tool",
-        )
+        await agent_service.run_contexts[0].speak_progress("正在进行地区获取。")
         await _drain_loop(2)
         cancelled_before_cleanup = agent_service.cancelled.is_set()
         await application.on_disconnect(context)
@@ -757,7 +770,7 @@ def test_application_speak_text_can_append_while_agent_stream_is_running() -> No
     cancelled_before_cleanup = asyncio.run(scenario())
 
     assert cancelled_before_cleanup is False
-    assert engine.pushed_texts == ["agent streaming", "正在查询天气"]
+    assert engine.pushed_texts == ["agent streaming", "正在进行地区获取。"]
     assert agent_service.cancelled.is_set()
 
 

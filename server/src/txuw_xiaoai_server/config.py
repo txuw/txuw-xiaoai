@@ -25,6 +25,10 @@ class Settings(BaseSettings):
         "请用自然、简短、口语化的中文回答。"
         "只输出纯文本，不要使用 Markdown、列表编号、代码块或表情。"
     )
+    amap_web_service_key: str = ""
+    region_tool_enabled: bool = True
+    region_tool_timeout_seconds: float = 1.0
+    region_tool_cache_ttl_seconds: float = 300.0
     memory_enabled: bool = False
     memory_user_id: str = "txuw"
     memory_llm_model: str = "gpt-5-nano-2025-08-07"

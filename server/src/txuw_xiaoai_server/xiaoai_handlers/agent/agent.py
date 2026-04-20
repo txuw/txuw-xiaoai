@@ -9,6 +9,9 @@ from typing import Any
 from agents import Agent, Model, ModelProvider, OpenAIChatCompletionsModel, RunConfig, Runner
 from openai import AsyncOpenAI
 
+from .runtime import AgentRunContext, DEFAULT_SKILL_PROFILE, SkillProfile
+from .tool import AgentToolsetFactory, RegionLookupService
+
 
 @dataclass(slots=True)
 class AgentStreamConfig:
@@ -39,37 +42,58 @@ class _OpenAiCompatibleModelProvider(ModelProvider):
 class AgentStreamService:
     """把 Agent SDK 的流式文本输出接回现有 TTS 链路。"""
 
-    def __init__(self, config: AgentStreamConfig) -> None:
+    def __init__(
+        self,
+        config: AgentStreamConfig,
+        *,
+        region_service: RegionLookupService,
+        toolset_factory: AgentToolsetFactory | None = None,
+        default_skill_profile: SkillProfile = DEFAULT_SKILL_PROFILE,
+    ) -> None:
         self._config = config
         self._client = self._build_client(config)
         self._model_provider = _OpenAiCompatibleModelProvider(self._client, config.model)
+        self._region_service = region_service
+        self._toolset_factory = toolset_factory or AgentToolsetFactory(
+            amap_web_service_key="",
+            region_tool_enabled=False,
+            region_tool_timeout_seconds=1.0,
+        )
+        self._default_skill_profile = default_skill_profile
         self._run_config = RunConfig(
             model_provider=self._model_provider,
             tracing_disabled=True,
         )
-        # 当前链路仍然由 Query/ASR 文本事件触发，所以这里保持无状态 Agent，
-        # 避免为单轮问答额外维护会话历史，先把输出接入点做得清晰可读。
-        self._agent = Agent(
-            name=config.agent_name,
-            instructions=config.system_prompt,
-        )
 
-    def stream_text(self, prompt: str) -> AsyncIterator[str]:
-        return self._stream_text(prompt)
+    @property
+    def region_service(self) -> RegionLookupService:
+        return self._region_service
+
+    def stream_text(
+        self,
+        prompt: str,
+        run_context: AgentRunContext,
+    ) -> AsyncIterator[str]:
+        return self._stream_text(prompt, run_context)
 
     async def close(self) -> None:
         close = getattr(self._client, "close", None)
-        if not callable(close):
-            return
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
-        result = close()
-        if inspect.isawaitable(result):
-            await result
+        await self._region_service.close()
 
-    async def _stream_text(self, prompt: str) -> AsyncIterator[str]:
+    async def _stream_text(
+        self,
+        prompt: str,
+        run_context: AgentRunContext,
+    ) -> AsyncIterator[str]:
         result = Runner.run_streamed(
-            self._agent,
+            self._build_agent(run_context),
             prompt,
+            context=run_context,
             run_config=self._run_config,
         )
 
@@ -85,6 +109,22 @@ class AgentStreamService:
 
         if result.run_loop_exception is not None:
             raise result.run_loop_exception
+
+    def _build_agent(self, run_context: AgentRunContext) -> Agent[AgentRunContext]:
+        toolset = self._toolset_factory.build_toolset(
+            run_context,
+            skill_profile=self._default_skill_profile,
+        )
+
+        # 当前 tools 数量仍然非常少，所以按轮动态构建 Agent 比预先维护全局 registry 更易读。
+        # 这样后续只需要替换 toolset factory，就能平滑接入 MCP 和 Skill，而不用改主链路。
+        return Agent(
+            name=self._config.agent_name,
+            instructions=_merge_instructions(self._config.system_prompt, toolset.extra_instructions),
+            tools=toolset.tools,
+            mcp_servers=toolset.mcp_servers,
+            mcp_config={"convert_schemas_to_strict": True},
+        )
 
     @staticmethod
     def _build_client(config: AgentStreamConfig) -> AsyncOpenAI:
@@ -110,3 +150,11 @@ def _extract_output_text_delta(event: Any) -> str:
 
     delta = getattr(data, "delta", None)
     return delta if isinstance(delta, str) else ""
+
+
+def _merge_instructions(system_prompt: str, extra_instructions: str) -> str:
+    if not extra_instructions.strip():
+        return system_prompt
+    if not system_prompt.strip():
+        return extra_instructions.strip()
+    return f"{system_prompt.strip()}\n\n{extra_instructions.strip()}"

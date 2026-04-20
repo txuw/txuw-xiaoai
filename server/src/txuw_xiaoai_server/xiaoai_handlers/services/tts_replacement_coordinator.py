@@ -8,7 +8,7 @@ from time import perf_counter
 
 from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider
 
-from ..agent import AgentStreamService
+from ..agent import AgentRunContext, AgentStreamService
 from ..ports import ConnectionContext, LegacyAudioInterrupter, StreamingTtsEngine
 from ..sessions import DialogSessionState, DialogSessionStore
 
@@ -327,6 +327,7 @@ class TtsReplacementCoordinator:
         task = asyncio.create_task(
             self._run_agent_stream(
                 context=context,
+                interrupter=interrupter,
                 dialog_id=dialog_id,
                 instruction_name=instruction_name,
                 prompt=prompt,
@@ -415,6 +416,7 @@ class TtsReplacementCoordinator:
         self,
         *,
         context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
         dialog_id: str,
         instruction_name: str,
         prompt: str,
@@ -442,7 +444,14 @@ class TtsReplacementCoordinator:
                 prompt=prompt,
                 source=source,
             )
-            async for delta in self._agent_service.stream_text(agent_prompt):
+            run_context = self._build_agent_run_context(
+                context=context,
+                interrupter=interrupter,
+                dialog_id=dialog_id,
+                instruction_name=instruction_name,
+                source=source,
+            )
+            async for delta in self._agent_service.stream_text(agent_prompt, run_context):
                 if not delta or not delta.strip():
                     continue
 
@@ -531,6 +540,51 @@ class TtsReplacementCoordinator:
             session = self._session_store.get(context.connection_id, dialog_id)
             if session is not None and session.agent_task is current_task:
                 session.agent_task = None
+
+    def _build_agent_run_context(
+        self,
+        *,
+        context: ConnectionContext,
+        interrupter: LegacyAudioInterrupter,
+        dialog_id: str,
+        instruction_name: str,
+        source: str,
+    ) -> AgentRunContext:
+        assert self._agent_service is not None
+
+        announce_once_keys: set[str] = set()
+
+        async def speak_progress(text: str) -> None:
+            normalized = text.strip()
+            if not normalized:
+                return
+
+            announce_key = _progress_announce_key(normalized)
+            # Tool 进度播报是体验提示，而不是正文内容；同一 dialog 里同一阶段只播一次，
+            # 可以避免模型多次尝试调用同一个工具时把“正在获取地区”反复读给用户听。
+            if announce_key in announce_once_keys:
+                return
+            announce_once_keys.add(announce_key)
+
+            await self.speak_text(
+                context,
+                interrupter,
+                dialog_id=dialog_id,
+                instruction_name="ToolCallStatus",
+                source="tool",
+                text=normalized,
+            )
+
+        return AgentRunContext(
+            connection_id=context.connection_id,
+            dialog_id=dialog_id,
+            instruction_name=instruction_name,
+            source=source,
+            locale="zh-CN",
+            speak_progress=speak_progress,
+            announce_once_keys=announce_once_keys,
+            region_service=self._agent_service.region_service,
+        )
 
     async def _build_agent_prompt(
         self,
@@ -755,3 +809,9 @@ def _get_agent_full_text(session: DialogSessionState | None) -> str:
     if session is None:
         return ""
     return session.agent_full_text
+
+
+def _progress_announce_key(text: str) -> str:
+    if text == "正在进行地区获取。":
+        return "region_lookup"
+    return f"progress:{text}"
