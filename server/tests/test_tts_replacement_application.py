@@ -9,6 +9,10 @@ from typing import Any
 from txuw_xiaoai_server.protocol import InboundResponse, ResponseBody, parse_text_message
 from txuw_xiaoai_server.transport import ClientSessionTransport
 from txuw_xiaoai_server.xiaoai_handlers import ConnectionContext, XiaoAiApplication
+from txuw_xiaoai_server.xiaoai_handlers.memory import (
+    MemoryRecallMetrics,
+    MemorySearchResult,
+)
 
 
 class FakeTransport:
@@ -155,12 +159,14 @@ class FakeMemoryProvider:
         *,
         enabled: bool = True,
         results: list[list[dict[str, object]]] | None = None,
+        search_metrics: list[MemoryRecallMetrics] | None = None,
         search_error: Exception | None = None,
         commit_worker: FakeMemoryCommitWorker | None = None,
         user_id: str = "txuw",
     ) -> None:
         self._enabled = enabled
         self._results = list(results or [])
+        self._search_metrics = list(search_metrics or [])
         self._search_error = search_error
         self.commit_worker = commit_worker
         self.user_id = user_id
@@ -179,12 +185,29 @@ class FakeMemoryProvider:
         self.shutdown_calls += 1
 
     async def search(self, query: str, *, user_id: str | None = None) -> list[dict[str, object]]:
+        result = await self.search_with_metrics(query, user_id=user_id)
+        return result.results
+
+    async def search_with_metrics(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+    ) -> MemorySearchResult:
         self.search_calls.append({"query": query, "user_id": user_id})
         if self._search_error is not None:
             raise self._search_error
-        if not self._results:
-            return []
-        return self._results.pop(0)
+        results = self._results.pop(0) if self._results else []
+        metrics = (
+            self._search_metrics.pop(0)
+            if self._search_metrics
+            else MemoryRecallMetrics(
+                embedding_http_ms=11,
+                milvus_search_ms=7,
+                memory_recall_total_ms=23,
+            )
+        )
+        return MemorySearchResult(results=results, metrics=metrics)
 
 
 class FakeWebSocket:
@@ -551,6 +574,55 @@ def test_query_recall_failure_falls_back_to_original_prompt() -> None:
     asyncio.run(scenario())
 
     assert agent_service.prompts == ["weather"]
+
+
+def test_memory_recall_completed_log_contains_stage_timings(caplog) -> None:
+    transport = FakeTransport()
+    engine = FakeEngine()
+    interrupter = FakeInterrupter()
+    agent_service = FakeAgentService([["answer"]])
+    memory_provider = FakeMemoryProvider(
+        results=[
+            [
+                {"memory": "主人最近在关注天气", "score": 0.92},
+            ]
+        ],
+        search_metrics=[
+            MemoryRecallMetrics(
+                embedding_http_ms=91,
+                milvus_search_ms=18,
+                memory_recall_total_ms=123,
+            )
+        ],
+        commit_worker=FakeMemoryCommitWorker(),
+    )
+    application = _create_application(
+        engine=engine,
+        interrupter=interrupter,
+        enabled=True,
+        agent_service=agent_service,
+        agent_enabled=True,
+        memory_provider=memory_provider,
+    )
+    context = _context("conn-memory-log", transport)
+
+    async def scenario() -> None:
+        await application.handle_inbound(_query_message("weather", "dialog-memory-log"), context)
+        await _drain_loop()
+
+    logger_name = "txuw_xiaoai_server.xiaoai_handlers.services.tts_replacement_coordinator"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        asyncio.run(scenario())
+
+    completed_records = [
+        record for record in caplog.records if record.msg == "memory.recall.completed"
+    ]
+
+    assert len(completed_records) == 1
+    assert getattr(completed_records[0], "embedding_http_ms") == 91
+    assert getattr(completed_records[0], "milvus_search_ms") == 18
+    assert getattr(completed_records[0], "memory_recall_total_ms") == 123
+    assert getattr(completed_records[0], "hitCount") == 1
 
 
 def test_agent_completed_log_contains_aggregated_text(caplog) -> None:

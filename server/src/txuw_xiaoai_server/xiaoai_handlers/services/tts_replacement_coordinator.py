@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
+from time import perf_counter
 
 from txuw_xiaoai_server.xiaoai_handlers.memory import MemoryProvider
 
@@ -544,8 +545,9 @@ class TtsReplacementCoordinator:
         if memory_provider is None or not memory_provider.enabled:
             return prompt
 
+        recall_started_at = perf_counter()
         try:
-            memories = await memory_provider.search(
+            search_result = await memory_provider.search_with_metrics(
                 prompt,
                 user_id=memory_provider.user_id,
             )
@@ -557,6 +559,9 @@ class TtsReplacementCoordinator:
                     "dialogId": dialog_id,
                     "instructionName": instruction_name,
                     "source": source,
+                    "embedding_http_ms": None,
+                    "milvus_search_ms": None,
+                    "memory_recall_total_ms": _duration_ms(recall_started_at),
                     "status": "timeout",
                     "summary": "memory recall timed out",
                 },
@@ -570,20 +575,21 @@ class TtsReplacementCoordinator:
                     "dialogId": dialog_id,
                     "instructionName": instruction_name,
                     "source": source,
+                    "embedding_http_ms": None,
+                    "milvus_search_ms": None,
+                    "memory_recall_total_ms": _duration_ms(recall_started_at),
                     "status": "error",
                     "summary": "memory recall failed",
                 },
             )
             return prompt
 
+        memories = search_result.results
         lines: list[str] = []
         for item in memories:
             memory_text = item.get("memory")
             if isinstance(memory_text, str) and memory_text.strip():
                 lines.append(f"- {memory_text.strip()}")
-
-        if not lines:
-            return prompt
 
         logger.info(
             "memory.recall.completed",
@@ -592,11 +598,16 @@ class TtsReplacementCoordinator:
                 "dialogId": dialog_id,
                 "instructionName": instruction_name,
                 "source": source,
+                "embedding_http_ms": search_result.metrics.embedding_http_ms,
+                "milvus_search_ms": search_result.metrics.milvus_search_ms,
+                "memory_recall_total_ms": search_result.metrics.memory_recall_total_ms,
                 "hitCount": len(lines),
                 "status": "completed",
                 "summary": "memory recall completed",
             },
         )
+        if not lines:
+            return prompt
         return (
             "以下是与当前用户有关的长期记忆，仅在确实相关时参考，不要生硬复述或逐条引用。\n"
             "[相关记忆]\n"
@@ -734,6 +745,10 @@ class TtsReplacementCoordinator:
 
 def _truncate_text(value: str, limit: int = 160) -> str:
     return value if len(value) <= limit else f"{value[:limit]}..."
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(int(round((perf_counter() - started_at) * 1000)), 0)
 
 
 def _get_agent_full_text(session: DialogSessionState | None) -> str:

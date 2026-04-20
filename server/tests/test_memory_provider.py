@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from types import ModuleType
 
 import pytest
@@ -20,19 +21,57 @@ class _FakeConfig:
         self.__dict__.update(kwargs)
 
 
+class _FakeMemoryItem:
+    def __init__(self, *, item_id: str, score: float, payload: dict[str, object]) -> None:
+        self.id = item_id
+        self.score = score
+        self.payload = payload
+
+
+class _FakeEmbeddingModel:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def embed(self, text: str, memory_action: str) -> list[float]:
+        self.calls.append({"text": text, "memory_action": memory_action})
+        time.sleep(0.001)
+        return [0.1, 0.2, 0.3]
+
+
+class _FakeVectorStore:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.search_response: list[_FakeMemoryItem] = []
+
+    def search(
+        self,
+        *,
+        query: str,
+        vectors: list[float],
+        limit: int,
+        filters: dict[str, object],
+    ) -> list[_FakeMemoryItem]:
+        self.calls.append(
+            {
+                "query": query,
+                "vectors": vectors,
+                "limit": limit,
+                "filters": filters,
+            }
+        )
+        time.sleep(0.001)
+        return list(self.search_response)
+
+
 class _FakeMemory:
     created_config = None
 
     def __init__(self, config) -> None:
         type(self).created_config = config
-        self.search_calls: list[dict[str, object]] = []
         self.add_calls: list[dict[str, object]] = []
-        self.search_response: dict[str, object] = {"results": []}
         self.add_response: dict[str, object] | list[dict[str, object]] | None = None
-
-    def search(self, query: str, *, user_id: str) -> dict[str, object]:
-        self.search_calls.append({"query": query, "user_id": user_id})
-        return self.search_response
+        self.embedding_model = _FakeEmbeddingModel()
+        self.vector_store = _FakeVectorStore()
 
     def add(self, messages: list[dict[str, str]], *, user_id: str) -> dict[str, object] | list[dict[str, object]] | None:
         self.add_calls.append({"messages": messages, "user_id": user_id})
@@ -118,7 +157,6 @@ def test_memory_provider_startup_uses_default_models_and_reused_litellm_settings
     assert provider.memory is None
     assert provider.commit_worker is None
 
-
 def test_memory_provider_search_filters_by_score_and_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -135,22 +173,82 @@ def test_memory_provider_search_filters_by_score_and_limit(
     asyncio.run(provider.startup())
     memory = provider.memory
     assert memory is not None
-    memory.search_response = {
-        "results": [
-            {"memory": "low", "score": 0.2},
-            {"memory": "first", "score": 0.9},
-            {"memory": "second", "score": 0.8},
-            {"memory": "third", "score": 0.7},
-        ]
-    }
+    memory.vector_store.search_response = [
+        _FakeMemoryItem(item_id="1", score=0.2, payload={"data": "low"}),
+        _FakeMemoryItem(item_id="2", score=0.9, payload={"data": "first"}),
+        _FakeMemoryItem(item_id="3", score=0.8, payload={"data": "second"}),
+        _FakeMemoryItem(item_id="4", score=0.7, payload={"data": "third"}),
+    ]
 
     results = asyncio.run(provider.search("weather", user_id="custom-user"))
 
     assert results == [
-        {"memory": "first", "score": 0.9},
-        {"memory": "second", "score": 0.8},
+        {
+            "id": "2",
+            "memory": "first",
+            "hash": None,
+            "created_at": None,
+            "updated_at": None,
+            "score": 0.9,
+        },
+        {
+            "id": "3",
+            "memory": "second",
+            "hash": None,
+            "created_at": None,
+            "updated_at": None,
+            "score": 0.8,
+        },
     ]
-    assert memory.search_calls == [{"query": "weather", "user_id": "custom-user"}]
+    assert memory.embedding_model.calls == [
+        {"text": "weather", "memory_action": "search"}
+    ]
+    assert memory.vector_store.calls == [
+        {
+            "query": "weather",
+            "vectors": [0.1, 0.2, 0.3],
+            "limit": 100,
+            "filters": {"user_id": "custom-user"},
+        }
+    ]
+
+
+def test_memory_provider_search_with_metrics_returns_stage_timings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_mem0(monkeypatch)
+    provider = MemoryProvider(
+        MemoryProviderConfig(
+            enabled=True,
+            milvus_url="http://milvus:19530",
+        ),
+        llm_api_key="test-key",
+    )
+    asyncio.run(provider.startup())
+    memory = provider.memory
+    assert memory is not None
+    memory.vector_store.search_response = [
+        _FakeMemoryItem(item_id="1", score=0.9, payload={"data": "first"}),
+    ]
+
+    result = asyncio.run(provider.search_with_metrics("weather", user_id="custom-user"))
+
+    assert result.results == [
+        {
+            "id": "1",
+            "memory": "first",
+            "hash": None,
+            "created_at": None,
+            "updated_at": None,
+            "score": 0.9,
+        }
+    ]
+    assert result.metrics.embedding_http_ms is not None
+    assert result.metrics.embedding_http_ms >= 0
+    assert result.metrics.milvus_search_ms is not None
+    assert result.metrics.milvus_search_ms >= 0
+    assert result.metrics.memory_recall_total_ms >= result.metrics.embedding_http_ms
+    assert result.metrics.memory_recall_total_ms >= result.metrics.milvus_search_ms
 
 
 def test_memory_commit_worker_logs_completed_when_memories_are_written(
