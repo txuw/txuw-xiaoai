@@ -26,8 +26,10 @@ dependencies = [
 txuw-xiaoai-server = "txuw_xiaoai_server.__main__:main"
 
 [dependency-groups]
-dev = [
+audio = [
     "pyaudio>=0.2.14",
+]
+dev = [
     "pytest>=8.3.0",
     "websockets>=15.0.1",
 ]

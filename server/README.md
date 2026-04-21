@@ -122,6 +122,19 @@ MEMORY_COMMIT_WORKER_COUNT=2
 
 原来的 `demo.py` 已迁移到 `tests/manual`。
 
+首次运行前，如果需要本地扬声器回放，请先安装额外音频依赖：
+
+```bash
+uv sync --group audio
+```
+
+如果在 Linux 上安装 `pyaudio` 失败，请先安装 PortAudio 开发包，例如：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y portaudio19-dev
+```
+
 在 `server` 目录下执行：
 
 ```bash

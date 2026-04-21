@@ -2054,8 +2054,10 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-dev = [
+audio = [
     { name = "pyaudio" },
+]
+dev = [
     { name = "pytest" },
     { name = "websockets" },
 ]
@@ -2076,8 +2078,8 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+audio = [{ name = "pyaudio", specifier = ">=0.2.14" }]
 dev = [
-    { name = "pyaudio", specifier = ">=0.2.14" },
     { name = "pytest", specifier = ">=8.3.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]

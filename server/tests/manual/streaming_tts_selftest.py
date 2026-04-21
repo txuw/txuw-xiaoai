@@ -3,13 +3,31 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
-import pyaudio
+try:
+    import pyaudio
+except ModuleNotFoundError as exc:
+    pyaudio = None
+    _PYAUDIO_IMPORT_ERROR = exc
+else:
+    _PYAUDIO_IMPORT_ERROR = None
 
 from txuw_xiaoai_server.config import settings
 from txuw_xiaoai_server.xiaoai_handlers.services.dashscope_streaming_tts import (
     DashScopeStreamingTtsConfig,
     DashScopeStreamingTtsEngine,
 )
+
+
+def require_pyaudio():
+    """确保手动音频回放依赖已安装。"""
+
+    if _PYAUDIO_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "未安装 pyaudio。请先在 server 目录执行 `uv sync --group audio`；"
+            "如果是在 Linux 上安装失败，请先安装 PortAudio 开发包，例如 `portaudio19-dev`。"
+        ) from _PYAUDIO_IMPORT_ERROR
+
+    return pyaudio
 
 
 def timestamp() -> str:
@@ -22,9 +40,10 @@ class LocalPyAudioSink:
     """把实时 TTS 输出写到本地扬声器，用于手动自测。"""
 
     def __init__(self) -> None:
-        self._player = pyaudio.PyAudio()
+        audio = require_pyaudio()
+        self._player = audio.PyAudio()
         self._stream = self._player.open(
-            format=pyaudio.paInt16,
+            format=audio.paInt16,
             channels=1,
             rate=settings.tts_sample_rate,
             output=True,
