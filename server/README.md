@@ -19,7 +19,7 @@ uv run txuw-xiaoai-server
 
 - `0.0.0.0:8000`
 - WebSocket 入口：`/ws`
-- 健康检查：`/healthz`
+- 健康检查：`/healthz`（兼容 `/health`）
 
 ## 开发命令
 

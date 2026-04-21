@@ -26,6 +26,13 @@ def test_healthz() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_health() -> None:
+    client = _create_test_client()
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_websocket_accepts_valid_text_message() -> None:
     client = _create_test_client()
     with client.websocket_connect("/ws") as websocket:

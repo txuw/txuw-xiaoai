@@ -51,9 +51,11 @@ def create_app(application: XiaoAiApplication | None = None) -> FastAPI:
 
     app = FastAPI(title="txuw-xiaoai-server", version="0.1.0", lifespan=lifespan)
 
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
+    async def health_status() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.add_api_route("/healthz", health_status, methods=["GET"])
+    app.add_api_route("/health", health_status, methods=["GET"])
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
